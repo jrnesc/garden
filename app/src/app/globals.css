@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Prettywise";
+  src: url("/fonts/prettywise-extrabold.otf") format("opentype");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --background: #7a9555;
+  --foreground: #1c2810;
+  --muted: #43562b;
+  --border: #5c7a3d;
+  --font-prettywise: "Prettywise", system-ui, sans-serif;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-prettywise);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-prettywise);
+  -webkit-font-smoothing: antialiased;
+}
+
+body:not(.no-grain)::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.4;
+  mix-blend-mode: overlay;
+  filter: url(#grain);
+  background: var(--background);
+}
+
+body:not(.no-grain) > *:not(svg) {
+  position: relative;
+  z-index: 1;
+}
+
+::selection {
+  background: #1c2810;
+  color: #7a9555;
+}

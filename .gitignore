@@ -1,0 +1,45 @@
+# OS
+.DS_Store
+
+# Editor / tools
+.claude/
+
+# Node
+node_modules/
+.pnp
+.pnp.*
+
+# Next.js / build
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# Cloudflare
+.wrangler/
+.open-next/
+.dev.vars
+
+# Env
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[oc]
+.venv/
+*.egg-info/
+
+# Vendored upstream (Meta's ai4animationpy — clone separately)
+ai4animationpy/
+
+# Reference papers / large binaries
+*.pdf
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+.pnpm-debug.log*

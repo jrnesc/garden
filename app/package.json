@@ -1,0 +1,35 @@
+{
+  "name": "inside-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "build:cf": "NEXT_PUBLIC_API_URL=https://inside-api.jrnescoffery.workers.dev npx @opennextjs/cloudflare build",
+    "preview": "npx wrangler pages dev",
+    "deploy": "npx @opennextjs/cloudflare deploy",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
+    "@sparkjsdev/spark": "^2.0.0",
+    "next": "16.2.3",
+    "onnxruntime-web": "^1.24.3",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@opennextjs/cloudflare": "^1.19.3",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/three": "^0.180.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.3",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

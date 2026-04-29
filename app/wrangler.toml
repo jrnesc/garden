@@ -1,0 +1,16 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "inside-app"
+main = ".open-next/worker.js"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "5e076f480b066ec02dc84b527b9ffc8b"
+
+[assets]
+directory = ".open-next/assets"
+
+[vars]
+NEXT_PUBLIC_API_URL = "https://inside-api.jrnescoffery.workers.dev"
+
+[[services]]
+binding = "API"
+service = "inside-api"

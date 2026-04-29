@@ -1,0 +1,12 @@
+name = "inside-api"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+account_id = "5e076f480b066ec02dc84b527b9ffc8b"
+
+# Secrets (set via `wrangler secret put <NAME>`):
+#   WLT_API_KEY   — World Labs Marble API key (WLT-Api-Key header)
+#   XAI_API_KEY   — xAI / Grok API key (Aurora image model)
+
+[[r2_buckets]]
+binding = "JOURNEYS_BUCKET"
+bucket_name = "inside-journeys"
