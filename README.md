@@ -1,4 +1,4 @@
-# Inside
+# garden
 
 A neural-animated character walking through Gaussian splat worlds, all running in a browser tab.
 
