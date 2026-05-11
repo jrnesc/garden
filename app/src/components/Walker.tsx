@@ -194,8 +194,8 @@ export default function Walker({
   const splatRef = useRef<THREE.Object3D | null>(null);
   const viewModeRef = useRef<0 | 1 | 2>(0); // 0=mesh, 1=splat+mesh, 2=splat
   const [viewMode, setViewMode] = useState<0 | 1 | 2>(0);
-  const cameraFollowRef = useRef(false);
-  const [cameraFollowUI, setCameraFollowUI] = useState(false);
+  const cameraFollowRef = useRef(true);
+  const [cameraFollowUI, setCameraFollowUI] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuTab, setMenuTab] = useState<"edit" | "game" | "controls">("edit");
   const [activeChar, setActiveChar] = useState("Dog");
@@ -1709,7 +1709,7 @@ export default function Walker({
                   setCameraFollowUI(next);
                 }}
                 aria-label="camera follow"
-                title={cameraFollowUI ? "camera: follow" : "camera: locked"}
+                title={cameraFollowUI ? "camera: locked" : "camera: free"}
                 className={`flex h-9 w-9 items-center justify-center rounded-lg ${
                   cameraFollowUI
                     ? "bg-white/15 text-white"

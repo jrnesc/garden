@@ -10,7 +10,8 @@ garden/
 │   │   │   ├── page.tsx          # Home — "inside" landing
 │   │   │   ├── character/        # Neural locomotion demo (ONNX in browser)
 │   │   │   ├── walk/             # Gaussian splat walker (character + physics + world)
-│   │   │   └── splats/           # List of generated splat worlds
+│   │   │   ├── splats/           # List of generated splat worlds
+│   │   │   └── nvidia-motion/    # Local-only MotionBricks / G1 experiment
 │   │   ├── components/
 │   │   │   ├── Walker.tsx        # Splat world renderer + character + physics + camera
 │   │   │   ├── Nav.tsx           # Navigation bar
@@ -46,6 +47,9 @@ garden/
 │                                 # Source of truth for neural nets, math, bone definitions
 │                                 # Only needed for exports and reference — not runtime
 │
+├── GR00T-WholeBodyControl/       # NVIDIA MotionBricks / G1 source (gitignored)
+│                                 # Required only for local /nvidia-motion streaming
+│
 └── concept.md                    # Project concept/spec
 ```
 
@@ -54,6 +58,8 @@ garden/
 - `app/src/app/character/` — character locomotion demo
 - `app/src/app/walk/` — splat world walker (main experience)
 - `app/src/app/splats/` — generated splat world list
+- `app/src/app/nvidia-motion/` — local-only NVIDIA MotionBricks / G1 demo
+- `app/src/app/api/motionbricks/` — local SSE/control endpoints for MotionBricks
 - `app/src/components/Walker.tsx` — splat renderer + character + physics + camera
 - `app/src/components/Nav.tsx` — navigation bar
 - `app/src/components/hud-icons.tsx` — icons + HUD constants
@@ -64,6 +70,11 @@ garden/
 - `app/src/lib/collider.ts` — collider mesh loading
 - `app/public/` — ONNX models, GLBs, companion data, paintings
 - `worker/` — API backend
+
+### LOCAL EXPERIMENTAL
+- `GR00T-WholeBodyControl/` — external NVIDIA MotionBricks checkout, intentionally gitignored
+- `GR00T-WholeBodyControl/tools/motionbricks_stream_worker.py` — Python stream worker used by `/api/motionbricks/stream`
+- `/nvidia-motion` is not Cloudflare-deployable as-is because it depends on that local Python process.
 
 ### REFERENCE (needed for development, not runtime)
 - `locomotion-server/export_onnx.py` — re-export biped model

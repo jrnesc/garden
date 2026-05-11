@@ -1,74 +1,53 @@
 # garden
 
-A neural-animated character walking through Gaussian splat worlds, all running in a browser tab.
+Neural characters walking through Gaussian splat worlds in the browser.
 
-## What this is
+Live app: <https://garden.jrnescoffery.workers.dev/>
 
-Three things stitched together client-side:
+## What This Is
 
-1. **Neural locomotion controller** — Meta's `ai4animationpy` CodebookMatching model, exported to ONNX and run via ONNX Runtime WebAssembly. Forward pass per frame produces the next pose. No server.
-2. **Physics** — Rapier (WASM) for terrain collision, wall collision, foot grounding.
-3. **Scene** — Gaussian splat worlds generated with Marble (World Labs), rendered with Spark.
+Garden combines:
 
-WASD + camera orbit. Dog / Wolf / Geno characters. The character "decides" how to walk based on intent and terrain instead of blending pre-recorded clips.
+- **Neural locomotion** — Meta `ai4animationpy` CodebookMatching models exported to ONNX and run client-side with ONNX Runtime WebAssembly.
+- **Physics** — Rapier WASM for terrain collision, wall collision, and foot grounding.
+- **Gaussian splats** — World Labs Marble scenes rendered with Spark.
+- **Experimental NVIDIA MotionBricks** — a local-only `/nvidia-motion` G1 demo driven by a Python SSE worker.
 
-## The model
+WASD + camera orbit. Dog, wolf, and Geno characters. The main walker runs in-browser; generated splat worlds are stored through the Cloudflare Worker/R2 pipeline.
 
-> Sebastian Starke, Paul Starke, Nicky He, Taku Komura, Yuting Ye.
-> **Categorical Codebook Matching for Embodied Character Controllers.**
+## Model
+
+> Sebastian Starke, Paul Starke, Nicky He, Taku Komura, Yuting Ye.  
+> **Categorical Codebook Matching for Embodied Character Controllers.**  
 > *ACM Transactions on Graphics (SIGGRAPH 2024).* [doi:10.1145/3658209](https://dl.acm.org/doi/10.1145/3658209)
 
-Instead of training a motion prior and a controller separately, the framework learns the motion manifold and the sampling policy end-to-end by matching probability distributions between two categorical codebooks (input intent ↔ output motion). Same motions map to the same codes, which avoids the blurring of MLP regressors and the mode-collapse of variational models.
-
 - Paper: <https://dl.acm.org/doi/10.1145/3658209>
-- Video: <https://www.youtube.com/watch?v=NyLRcY0c0p4>
-- Reference code (Unity): <https://github.com/sebastianstarke/AI4Animation/tree/master/AI4Animation/SIGGRAPH_2024>
+- Reference code: <https://github.com/sebastianstarke/AI4Animation/tree/master/AI4Animation/SIGGRAPH_2024>
 - Python framework: <https://github.com/facebookresearch/ai4animationpy>
 
 ## Setup
 
-This isn't a one-click clone. You'll need API keys, you'll need to export the ONNX model from Meta's repo yourself, and you'll need to generate your own splat worlds — the ones I made aren't included.
+This is not a one-click clone. You need to export the ONNX models yourself, provide API keys, and generate your own splat worlds.
 
-**Prerequisites**
+Prerequisites:
+
 - Node 20+
-- Python 3.11+, [uv](https://docs.astral.sh/uv/)
-- [Cloudflare Wrangler](https://developers.cloudflare.com/workers/wrangler/) (`npm i -g wrangler`)
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- Cloudflare Wrangler
+- World Labs Marble API key as `WLT_API_KEY`
+- xAI API key as `XAI_API_KEY`
 
-**API keys you need**
-- **World Labs Marble** — for splat world generation. Apply at <https://marble.worldlabs.ai>. Stored as `WLT_API_KEY`.
-- **xAI / Grok** — for image-to-image seed generation feeding into Marble. Get a key at <https://console.x.ai>. Stored as `XAI_API_KEY`.
-- **Cloudflare account** — for the Worker and R2 bucket. Replace the `account_id` in `worker/wrangler.toml` and `app/wrangler.toml` with your own.
-
-**1. Export the ONNX model**
-
-Clone Meta's repo alongside this one (it's gitignored intentionally — it's huge):
+Export models:
 
 ```bash
 git clone https://github.com/facebookresearch/ai4animationpy.git
 cd locomotion-server
 uv sync
-uv run python export_onnx.py        # biped (CodebookMatching)
-uv run python export_quadruped.py   # dog/wolf
+uv run python export_onnx.py
+uv run python export_quadruped.py
 ```
 
-Outputs go into `app/public/` as `.onnx` files plus the `locomotion-data.json` / `quadruped-data.json` skeleton metadata.
-
-**2. Worker (Marble + Grok proxy + R2)**
-
-```bash
-cd worker
-npm install
-wrangler secret put WLT_API_KEY
-wrangler secret put XAI_API_KEY
-wrangler r2 bucket create inside-journeys
-wrangler deploy
-```
-
-**3. Generate your own splat worlds**
-
-The Beksiński worlds I made aren't in this repo. You'll need to generate your own — the app has a generation flow, or you can hit the worker's Marble endpoint directly. Each world takes ~5–15 minutes on Marble's side and costs credits. Resulting `.spz` files are stored in R2 and referenced by the app.
-
-**4. Run the app**
+Run the app:
 
 ```bash
 cd app
@@ -76,19 +55,28 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:3000>. The `/character` route is a flat-ground locomotion demo (no splat dependency, good for verifying the ONNX runtime works). `/walk` is the splat-world version and needs at least one generated world. `/splats` expects the API worker on <http://localhost:8787>; if it is not running, the splat list will simply show empty. `/history` redirects to `/splats` for old links.
-
-For full local development, run the worker in a second terminal:
+Run the API worker locally:
 
 ```bash
 cd worker
+npm install
 npm run dev
 ```
 
+Open <http://localhost:3000>. `/character` is the flat-ground locomotion demo, `/walk` is the splat walker, and `/splats` lists generated worlds. `/history` redirects to `/splats`.
+
+## NVIDIA MotionBricks
+
+`/nvidia-motion` is an experimental local G1 locomotion demo. The browser renders the G1 meshes, while live motion streams from NVIDIA MotionBricks through a Python SSE worker.
+
+To run it, provide `GR00T-WholeBodyControl/` alongside this repo and set up its MotionBricks Python environment. That directory is intentionally gitignored because it is a large external dependency. This route is not deployable to Cloudflare as-is because it depends on a local Python process.
+
 ## Layout
 
-- `app/` — Next.js + Three.js + Spark frontend. ONNX inference, Rapier physics, splat rendering.
-- `locomotion-server/` — Python tooling: ONNX export from the Meta repo, validation, a server used during development.
-- `worker/` — Cloudflare Worker (Marble / Grok proxy for splat generation).
-- `ai4animationpy/` — Meta's upstream repo (gitignored; clone from <https://github.com/facebookresearch/ai4animationpy>).
+- `app/` — Next.js + Three.js frontend.
+- `worker/` — Cloudflare Worker for Marble/Grok proxying and R2-backed splat journeys.
+- `locomotion-server/` — Python export and validation tools.
+- `ai4animationpy/` — external Meta framework checkout, gitignored.
+- `GR00T-WholeBodyControl/` — external NVIDIA MotionBricks/G1 checkout, gitignored.
+
 See `ARCHITECTURE.md` for deeper notes.
