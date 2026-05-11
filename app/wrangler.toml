@@ -1,5 +1,5 @@
 #:schema node_modules/wrangler/config-schema.json
-name = "inside-app"
+name = "garden"
 main = ".open-next/worker.js"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
