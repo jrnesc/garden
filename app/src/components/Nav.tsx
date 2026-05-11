@@ -13,6 +13,9 @@ export default function Nav() {
         <Link href="/character" className="hover:text-[var(--foreground)]">
           character
         </Link>
+        <Link href="/nvidia-motion" className="hover:text-[var(--foreground)]">
+          nvidia motion
+        </Link>
       </div>
     </nav>
   );

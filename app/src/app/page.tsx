@@ -10,6 +10,9 @@ export default function Home() {
         <Link href="/character" className="hover:text-[var(--foreground)]">
           character
         </Link>
+        <Link href="/nvidia-motion" className="hover:text-[var(--foreground)]">
+          nvidia motion
+        </Link>
       </nav>
 
       <main className="flex flex-1 flex-col items-start justify-end px-8 pb-12">
