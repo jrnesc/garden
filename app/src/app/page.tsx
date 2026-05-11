@@ -4,8 +4,8 @@ export default function Home() {
   return (
     <div className="flex min-h-screen flex-col">
       <nav className="flex items-center justify-end gap-6 px-8 py-6 text-sm text-[var(--muted)]">
-        <Link href="/history" className="hover:text-[var(--foreground)]">
-          gallery
+        <Link href="/splats" className="hover:text-[var(--foreground)]">
+          splats
         </Link>
         <Link href="/character" className="hover:text-[var(--foreground)]">
           character

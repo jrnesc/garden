@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "build:cf": "NEXT_PUBLIC_API_URL=https://inside-api.jrnescoffery.workers.dev npx @opennextjs/cloudflare build",
+    "build:cf": "NEXT_PUBLIC_API_URL=https://inside-api.jrnescoffery.workers.dev npx @opennextjs/cloudflare build && rm -f .open-next/assets/*.onnx",
     "preview": "npx wrangler pages dev",
     "deploy": "npx @opennextjs/cloudflare deploy",
     "start": "next start",

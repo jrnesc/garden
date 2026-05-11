@@ -7,8 +7,8 @@ export default function Nav() {
         garden
       </Link>
       <div className="flex gap-6 text-[var(--muted)]">
-        <Link href="/history" className="hover:text-[var(--foreground)]">
-          gallery
+        <Link href="/splats" className="hover:text-[var(--foreground)]">
+          splats
         </Link>
         <Link href="/character" className="hover:text-[var(--foreground)]">
           character

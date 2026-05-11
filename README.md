@@ -30,9 +30,9 @@ Instead of training a motion prior and a controller separately, the framework le
 This isn't a one-click clone. You'll need API keys, you'll need to export the ONNX model from Meta's repo yourself, and you'll need to generate your own splat worlds — the ones I made aren't included.
 
 **Prerequisites**
-- Node 20+, [pnpm](https://pnpm.io)
+- Node 20+
 - Python 3.11+, [uv](https://docs.astral.sh/uv/)
-- [Cloudflare Wrangler](https://developers.cloudflare.com/workers/wrangler/) (`pnpm i -g wrangler`)
+- [Cloudflare Wrangler](https://developers.cloudflare.com/workers/wrangler/) (`npm i -g wrangler`)
 
 **API keys you need**
 - **World Labs Marble** — for splat world generation. Apply at <https://marble.worldlabs.ai>. Stored as `WLT_API_KEY`.
@@ -57,7 +57,7 @@ Outputs go into `app/public/` as `.onnx` files plus the `locomotion-data.json` /
 
 ```bash
 cd worker
-pnpm install
+npm install
 wrangler secret put WLT_API_KEY
 wrangler secret put XAI_API_KEY
 wrangler r2 bucket create inside-journeys
@@ -72,11 +72,18 @@ The Beksiński worlds I made aren't in this repo. You'll need to generate your o
 
 ```bash
 cd app
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
 
-Open <http://localhost:3000>. The `/character` route is a flat-ground locomotion demo (no splat dependency, good for verifying the ONNX runtime works). `/walk` is the splat-world version and needs at least one generated world.
+Open <http://localhost:3000>. The `/character` route is a flat-ground locomotion demo (no splat dependency, good for verifying the ONNX runtime works). `/walk` is the splat-world version and needs at least one generated world. `/splats` expects the API worker on <http://localhost:8787>; if it is not running, the splat list will simply show empty. `/history` redirects to `/splats` for old links.
+
+For full local development, run the worker in a second terminal:
+
+```bash
+cd worker
+npm run dev
+```
 
 ## Layout
 
@@ -84,5 +91,4 @@ Open <http://localhost:3000>. The `/character` route is a flat-ground locomotion
 - `locomotion-server/` — Python tooling: ONNX export from the Meta repo, validation, a server used during development.
 - `worker/` — Cloudflare Worker (Marble / Grok proxy for splat generation).
 - `ai4animationpy/` — Meta's upstream repo (gitignored; clone from <https://github.com/facebookresearch/ai4animationpy>).
-
-See `ARCHITECTURE.md`, `HANDOFF.md`, and `ONNX_HANDOFF.md` for deeper notes.
+See `ARCHITECTURE.md` for deeper notes.

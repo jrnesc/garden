@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { cors } from "hono/cors";
 import { ulid } from "ulid";
 
@@ -7,6 +8,8 @@ type Env = {
   WLT_API_KEY: string;
   XAI_API_KEY: string;
 };
+
+type AppContext = Context<{ Bindings: Env }>;
 
 const MARBLE_BASE = "https://api.worldlabs.ai/marble/v1";
 const XAI_IMAGES = "https://api.x.ai/v1/images/generations";
@@ -196,10 +199,10 @@ app.get("/assets/:key{.+}", async (c) => {
   return new Response(obj.body, { headers });
 });
 
-// POST /journeys — run the full chain and persist a pending record.
+// POST /splats — run the full chain and persist a pending record.
 // Body: { prompt: string, style?: string, displayName?: string }
 // Returns: JourneyRecord (status "pending")
-app.post("/journeys", async (c) => {
+async function createSplatResponse(c: AppContext) {
   const body = await c.req.json<{
     prompt?: string;
     style?: string;
@@ -237,16 +240,32 @@ app.post("/journeys", async (c) => {
   } catch (err) {
     return c.json({ error: String(err) }, 502);
   }
-});
+}
 
-// GET /journeys — list all records, newest first
-app.get("/journeys", async (c) => {
+app.post("/splats", createSplatResponse);
+
+// POST /journeys — legacy alias for /splats
+app.post("/journeys", createSplatResponse);
+
+async function listSplatsResponse(c: {
+  env: Env;
+  json: (data: unknown, status?: number) => Response;
+}) {
   const records = await listJourneys(c.env.JOURNEYS_BUCKET);
-  return c.json({ journeys: records });
-});
+  return c.json({ splats: records, journeys: records });
+}
 
-// GET /journeys/:ulid — fetch one record. If pending, poll Marble and update if done.
-app.get("/journeys/:id", async (c) => {
+// GET /splats — list all records, newest first
+app.get("/splats", async (c) => listSplatsResponse(c));
+
+// GET /journeys — legacy alias for /splats
+app.get("/journeys", async (c) => listSplatsResponse(c));
+
+async function getSplatResponse(c: {
+  env: Env;
+  req: { param: (name: string) => string };
+  json: (data: unknown, status?: number) => Response;
+}) {
   const id = c.req.param("id");
   const rec = await loadJourney(c.env.JOURNEYS_BUCKET, id);
   if (!rec) return c.json({ error: "not found" }, 404);
@@ -268,14 +287,29 @@ app.get("/journeys/:id", async (c) => {
   } catch (err) {
     return c.json({ ...rec, error: String(err) }, 502);
   }
-});
+}
 
-// DELETE /journeys/:ulid — remove from R2
-app.delete("/journeys/:id", async (c) => {
+// GET /splats/:ulid — fetch one record. If pending, poll Marble and update if done.
+app.get("/splats/:id", async (c) => getSplatResponse(c));
+
+// GET /journeys/:ulid — legacy alias for /splats/:ulid
+app.get("/journeys/:id", async (c) => getSplatResponse(c));
+
+async function deleteSplatResponse(c: {
+  env: Env;
+  req: { param: (name: string) => string };
+  json: (data: unknown, status?: number) => Response;
+}) {
   const id = c.req.param("id");
   await c.env.JOURNEYS_BUCKET.delete(journeyKey(id));
   return c.json({ ok: true });
-});
+}
+
+// DELETE /splats/:ulid — remove from R2
+app.delete("/splats/:id", async (c) => deleteSplatResponse(c));
+
+// DELETE /journeys/:ulid — legacy alias for /splats/:ulid
+app.delete("/journeys/:id", async (c) => deleteSplatResponse(c));
 
 // POST /edit-intent — Wave 2 spike.
 // Body: { screenshot: base64 data URL, intent: string, width: number, height: number,
@@ -519,10 +553,10 @@ Answer in 1-3 sentences. Be evocative and specific about what's visible. Speak a
   }
 });
 
-// POST /journeys/backfill — reconstruct a record from a known Marble world_id or operation_id.
+// POST /splats/backfill — reconstruct a record from a known Marble world_id or operation_id.
 // Body: { worldId | operationId, prompt, style?, imageUrl? }
 // Uses the Marble thumbnail as the card image when no Grok imageUrl is provided.
-app.post("/journeys/backfill", async (c) => {
+async function backfillSplatResponse(c: AppContext) {
   const body = await c.req.json<{
     worldId?: string;
     operationId?: string;
@@ -566,11 +600,16 @@ app.post("/journeys/backfill", async (c) => {
   } catch (err) {
     return c.json({ error: String(err) }, 502);
   }
-});
+}
 
-// POST /journeys/from-image — send an existing image directly to Marble (skip Grok).
+app.post("/splats/backfill", backfillSplatResponse);
+
+// POST /journeys/backfill — legacy alias for /splats/backfill
+app.post("/journeys/backfill", backfillSplatResponse);
+
+// POST /splats/from-image — send an existing image directly to Marble (skip Grok).
 // Body: { image: base64 data URL, prompt: string, displayName?: string }
-app.post("/journeys/from-image", async (c) => {
+async function createSplatFromImageResponse(c: AppContext) {
   const body = await c.req.json<{
     image?: string;
     prompt?: string;
@@ -618,7 +657,12 @@ app.post("/journeys/from-image", async (c) => {
   } catch (err) {
     return c.json({ error: String(err) }, 502);
   }
-});
+}
+
+app.post("/splats/from-image", createSplatFromImageResponse);
+
+// POST /journeys/from-image — legacy alias for /splats/from-image
+app.post("/journeys/from-image", createSplatFromImageResponse);
 
 // POST /generate-image — image-to-image via Grok edits API.
 // Body: { image: base64 data URL, prompt: string }

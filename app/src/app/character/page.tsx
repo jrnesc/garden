@@ -4,6 +4,7 @@ import type * as THREE from "three";
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import { LocomotionEngine, type LocoData } from "@/lib/locomotion";
+import LoadingParticles from "@/components/LoadingParticles";
 import {
   IconArrowLeft,
   IconClose,
@@ -378,9 +379,7 @@ export default function CharacterPage() {
       <div ref={mountRef} className="h-full w-full" />
 
       {loading && (
-        <div style={HUD_FONT} className="absolute inset-0 z-30 flex items-center justify-center">
-          <span className="text-[13px] text-zinc-400">Loading...</span>
-        </div>
+        <LoadingParticles label="loading character" className="z-30" />
       )}
 
       {!menuOpen && !loading && (

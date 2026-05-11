@@ -35,6 +35,12 @@ __pycache__/
 # Vendored upstream (Meta's ai4animationpy — clone separately)
 ai4animationpy/
 
+# Local research / handoff notes
+GR00T-WholeBodyControl/
+ONNX_HANDOFF.md
+HANDOFF.md
+SONIC_HANDOFF.md
+
 # Reference papers / large binaries
 *.pdf
 

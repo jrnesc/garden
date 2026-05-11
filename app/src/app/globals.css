@@ -9,10 +9,10 @@
 }
 
 :root {
-  --background: #7a9555;
-  --foreground: #1c2810;
-  --muted: #43562b;
-  --border: #5c7a3d;
+  --background: #ffffff;
+  --foreground: #4A5D23;
+  --muted: #4A5D23;
+  --border: #4A5D23;
   --font-prettywise: "Prettywise", system-ui, sans-serif;
 }
 
@@ -25,10 +25,15 @@
 
 html,
 body {
-  background: var(--background);
+  min-height: 100%;
+  background: #ffffff !important;
   color: var(--foreground);
   font-family: var(--font-prettywise);
   -webkit-font-smoothing: antialiased;
+}
+
+body {
+  background-color: #ffffff !important;
 }
 
 body:not(.no-grain)::before {
@@ -49,6 +54,6 @@ body:not(.no-grain) > *:not(svg) {
 }
 
 ::selection {
-  background: #1c2810;
-  color: #7a9555;
+  background: #4A5D23;
+  color: #ffffff;
 }

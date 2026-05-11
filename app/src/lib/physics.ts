@@ -16,6 +16,21 @@ async function ensureRapier() {
 export type PhysicsWorld = {
   /** Step the physics world (call once per frame) */
   step(): void;
+  /** Create a dynamic box body for an object in the splat world. */
+  createArtifactBox(opts: {
+    x: number;
+    y: number;
+    z: number;
+    halfExtents: { x: number; y: number; z: number };
+  }): PhysicsArtifactBody;
+  /** Create a movable kinematic ramp collider. */
+  createRamp(opts: {
+    x: number;
+    y: number;
+    z: number;
+    halfExtents: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number; w: number };
+  }): PhysicsRampBody;
   /**
    * Move the character capsule by a desired delta.
    * Returns the corrected world position after collision resolution.
@@ -30,6 +45,34 @@ export type PhysicsWorld = {
     dt: number,
   ): { x: number; y: number; z: number; grounded: boolean };
   /** Dispose all physics resources */
+  dispose(): void;
+};
+
+export type PhysicsArtifactBody = {
+  /** Pin the body to a kinematic target, useful for carrying/placing. */
+  setKinematicPosition(x: number, y: number, z: number): void;
+  /** Toggle whether the artifact participates in the physics solve. */
+  setPhysicsEnabled(enabled: boolean): void;
+  /** Release the body back to dynamic simulation. */
+  setDynamic(linearVelocity?: { x: number; y: number; z: number }): void;
+  /** Teleport while keeping the body dynamic. */
+  setDynamicPosition(x: number, y: number, z: number): void;
+  getPosition(): { x: number; y: number; z: number };
+  dispose(): void;
+};
+
+export type PhysicsRampBody = {
+  setPhysicsEnabled(enabled: boolean): void;
+  dropAt(
+    x: number,
+    y: number,
+    z: number,
+    rotation: { x: number; y: number; z: number; w: number },
+  ): void;
+  getPosition(): {
+    translation: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number; w: number };
+  };
   dispose(): void;
 };
 
@@ -139,6 +182,121 @@ export async function createPhysicsWorld(
   return {
     step() {
       world.step();
+    },
+
+    createArtifactBox(opts) {
+      const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(opts.x, opts.y, opts.z)
+        .setLinearDamping(1.8)
+        .setAngularDamping(1.4)
+        .setCanSleep(false);
+      const artifactBody = world.createRigidBody(bodyDesc);
+      const colliderDesc = RAPIER.ColliderDesc.cuboid(
+        opts.halfExtents.x,
+        opts.halfExtents.y,
+        opts.halfExtents.z,
+      )
+        .setDensity(0.7)
+        .setFriction(0.9)
+        .setRestitution(0.05);
+      const artifactCollider = world.createCollider(colliderDesc, artifactBody);
+
+      return {
+        setKinematicPosition(x, y, z) {
+          if (artifactBody.bodyType() !== RAPIER.RigidBodyType.KinematicPositionBased) {
+            artifactBody.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+          }
+          artifactBody.setNextKinematicTranslation(new RAPIER.Vector3(x, y, z));
+        },
+
+        setPhysicsEnabled(enabled) {
+          artifactCollider.setEnabled(enabled);
+          artifactBody.setEnabled(enabled);
+        },
+
+        setDynamic(linearVelocity) {
+          if (artifactBody.bodyType() !== RAPIER.RigidBodyType.Dynamic) {
+            artifactBody.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+          }
+          artifactBody.setLinvel(
+            new RAPIER.Vector3(
+              linearVelocity?.x ?? 0,
+              linearVelocity?.y ?? 0,
+              linearVelocity?.z ?? 0,
+            ),
+            true,
+          );
+          artifactBody.setAngvel(new RAPIER.Vector3(0, 0, 0), true);
+        },
+
+        setDynamicPosition(x, y, z) {
+          if (artifactBody.bodyType() !== RAPIER.RigidBodyType.Dynamic) {
+            artifactBody.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+          }
+          artifactBody.setTranslation(new RAPIER.Vector3(x, y, z), true);
+          artifactBody.setLinvel(new RAPIER.Vector3(0, 0, 0), true);
+          artifactBody.setAngvel(new RAPIER.Vector3(0, 0, 0), true);
+        },
+
+        getPosition() {
+          const p = artifactBody.translation();
+          return { x: p.x, y: p.y, z: p.z };
+        },
+
+        dispose() {
+          if (artifactBody.isValid()) world.removeRigidBody(artifactBody);
+        },
+      };
+    },
+
+    createRamp(opts) {
+      const rampBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(opts.x, opts.y, opts.z)
+        .setRotation(opts.rotation)
+        .setLinearDamping(1.6)
+        .setAngularDamping(2.1)
+        .setCanSleep(false);
+      const rampBody = world.createRigidBody(rampBodyDesc);
+      const rampColliderDesc = RAPIER.ColliderDesc.cuboid(
+        opts.halfExtents.x,
+        opts.halfExtents.y,
+        opts.halfExtents.z,
+      )
+        .setDensity(1.4)
+        .setFriction(1)
+        .setRestitution(0.02);
+      world.createCollider(rampColliderDesc, rampBody);
+      const rampCollider = rampBody.collider(0);
+
+      return {
+        setPhysicsEnabled(enabled) {
+          rampCollider.setEnabled(enabled);
+          rampBody.setEnabled(enabled);
+        },
+
+        dropAt(x, y, z, rotation) {
+          if (rampBody.bodyType() !== RAPIER.RigidBodyType.Dynamic) {
+            rampBody.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+          }
+          rampBody.setTranslation(new RAPIER.Vector3(x, y, z), true);
+          rampBody.setRotation(rotation, true);
+          rampBody.setLinvel(new RAPIER.Vector3(0, -0.15, 0), true);
+          rampBody.setAngvel(new RAPIER.Vector3(0, 0, 0), true);
+        },
+
+        getPosition() {
+          const translation = rampBody.translation();
+          const rotation = rampBody.rotation();
+          return {
+            translation: { x: translation.x, y: translation.y, z: translation.z },
+            rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
+          };
+        },
+
+        dispose() {
+          if (rampBody.isValid()) world.removeRigidBody(rampBody);
+        },
+      };
     },
 
     move(

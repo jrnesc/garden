@@ -3,9 +3,15 @@
 import type * as THREE from "three";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { API_BASE } from "@/lib/api";
+import LoadingParticles from "@/components/LoadingParticles";
 import { loadColliderMesh } from "@/lib/collider";
 import { LocomotionEngine, type LocoData } from "@/lib/locomotion";
-import { createPhysicsWorld, type PhysicsWorld } from "@/lib/physics";
+import {
+  createPhysicsWorld,
+  type PhysicsArtifactBody,
+  type PhysicsRampBody,
+  type PhysicsWorld,
+} from "@/lib/physics";
 import Link from "next/link";
 import {
   IconArrowLeft,
@@ -14,7 +20,6 @@ import {
   IconClose,
   IconGrid,
   IconKeyboard,
-  IconMessage,
   IconTrash,
   IconUndo,
   HUD_FONT,
@@ -48,6 +53,7 @@ const SPEED_TIERS = [
 
 type Props = {
   splatUrl: string;
+  splatPaged?: boolean;
   colliderMeshUrl?: string | null;
   metricScale?: number | null;
   groundPlaneOffset?: number | null;
@@ -60,6 +66,31 @@ type EditOp = {
   color: string | null;
   op: string;
   size: string;
+};
+
+type WalkArtifactState = "ground" | "selected" | "pickup" | "carried" | "settle";
+
+type WalkArtifact = {
+  id: string;
+  label: string;
+  group: THREE.Group;
+  coreMaterial: THREE.MeshStandardMaterial;
+  haloMaterial: THREE.MeshBasicMaterial;
+  focusMaterial: THREE.MeshBasicMaterial;
+  body: PhysicsArtifactBody | null;
+  state: WalkArtifactState;
+  transitionFrom: THREE.Vector3;
+  transitionTo: THREE.Vector3;
+  transitionStart: number;
+  transitionDuration: number;
+  settleUntil: number;
+  delivered: boolean;
+};
+
+type WalkRamp = {
+  group: THREE.Group;
+  body: PhysicsRampBody | null;
+  selected: boolean;
 };
 
 type WalkerHandle = {
@@ -90,6 +121,20 @@ const SIZE_MAP: Record<string, number> = {
   medium: 0.8,
   large: 2.0,
 };
+
+const SPARK_SORT_INTERVAL_MS = 140;
+const SPARK_MIN_ALPHA = 2 / 255;
+const SPARK_MAX_STD_DEV = Math.sqrt(4);
+const SPARK_MAX_PIXEL_RADIUS = 384;
+const WALKER_MAX_PIXEL_RATIO = 1.0;
+const CAMERA_FOLLOW_HZ = 5;
+const CAMERA_FOLLOW_DEADBAND_M = 0.0025;
+const CAMERA_NECK_PITCH = 0.24;
+const CAMERA_NECK_DISTANCE = 0.82;
+const CAMERA_MIN_DISTANCE = 0.28;
+const CAMERA_MAX_DISTANCE = 8;
+const CAMERA_ANCHOR_FALLBACK_Y = 0.42;
+const CAMERA_ANCHOR_BONES = ["Neck", "Head", "HeadSite", "Spine1", "Spine", "Hips"];
 
 const COLOR_CSS: Record<string, string> = {
   red: "#e04040", blue: "#4040e0", green: "#40e040", yellow: "#e0e040",
@@ -135,6 +180,7 @@ function asNum(v: unknown): number | null {
 
 export default function Walker({
   splatUrl,
+  splatPaged = false,
   colliderMeshUrl,
   metricScale,
   userPrompt,
@@ -148,41 +194,46 @@ export default function Walker({
   const splatRef = useRef<THREE.Object3D | null>(null);
   const viewModeRef = useRef<0 | 1 | 2>(0); // 0=mesh, 1=splat+mesh, 2=splat
   const [viewMode, setViewMode] = useState<0 | 1 | 2>(0);
-  const cameraFollowRef = useRef(true);
-  const [cameraFollowUI, setCameraFollowUI] = useState(true);
-  const [quickIntent, setQuickIntent] = useState("");
-  const [quickSubmitting, setQuickSubmitting] = useState(false);
+  const cameraFollowRef = useRef(false);
+  const [cameraFollowUI, setCameraFollowUI] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [menuTab, setMenuTab] = useState<"edit" | "ask" | "controls">("edit");
+  const [menuTab, setMenuTab] = useState<"edit" | "game" | "controls">("edit");
   const [activeChar, setActiveChar] = useState("Dog");
   const [activeStyle, setActiveStyle] = useState("Walk");
   const [activeSpeed, setActiveSpeed] = useState("Walk");
   const [styles, setStyles] = useState<string[]>([]);
   const [charLoading, setCharLoading] = useState(false);
+  const [splatLoading, setSplatLoading] = useState(true);
   const walkSpeedRef = useRef(1.0);
   const engineRef = useRef<LocomotionEngine | null>(null);
   const loadCharRef = useRef<((def: CharacterDef) => Promise<void>) | null>(null);
   const [intent, setIntent] = useState("");
-  const [question, setQuestion] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastEdit, setLastEdit] = useState<{
     reason: string | null;
     usage: Record<string, unknown> | null;
   } | null>(null);
-  const [answer, setAnswer] = useState<string | null>(null);
-  const [askSubmitting, setAskSubmitting] = useState(false);
   const [paintMode, setPaintMode] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState(false);
+  const [deliveryDelivered, setDeliveryDelivered] = useState(0);
+  const [rampSelectedUI, setRampSelectedUI] = useState(false);
   const [paintColor, setPaintColor] = useState("red");
   const [paintOp, setPaintOp] = useState("recolor");
   const [paintSize, setPaintSize] = useState("medium");
   const paintModeRef = useRef(false);
+  const deliveryModeRef = useRef(false);
+  const deliveryRuntimeRef = useRef<{ setEnabled: (enabled: boolean) => void } | null>(null);
   const paintOpRef = useRef("recolor");
   const paintColorRef = useRef("red");
   const paintSizeRef = useRef("medium");
 
   // Sync paint refs so canvas event handlers can read current values
   useEffect(() => { paintModeRef.current = paintMode; }, [paintMode]);
+  useEffect(() => {
+    deliveryModeRef.current = deliveryMode;
+    deliveryRuntimeRef.current?.setEnabled(deliveryMode);
+  }, [deliveryMode]);
   useEffect(() => { paintOpRef.current = paintOp; }, [paintOp]);
   useEffect(() => { paintColorRef.current = paintColor; }, [paintColor]);
   useEffect(() => { paintSizeRef.current = paintSize; }, [paintSize]);
@@ -262,22 +313,25 @@ export default function Walker({
         antialias: false,
         alpha: false,
       });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, WALKER_MAX_PIXEL_RATIO));
       renderer.setSize(mount.clientWidth, mount.clientHeight);
       mount.appendChild(renderer.domElement);
 
       const spark = new SparkRenderer({
         renderer,
-        maxPixelRadius: 2,
-        maxStdDev: 1.0,
+        maxPixelRadius: SPARK_MAX_PIXEL_RADIUS,
+        maxStdDev: SPARK_MAX_STD_DEV,
+        minAlpha: SPARK_MIN_ALPHA,
         falloff: 0,
-        lodRenderScale: 3,
-        minSortIntervalMs: 16,
+        lodRenderScale: 2.5,
+        minSortIntervalMs: SPARK_SORT_INTERVAL_MS,
+        sortRadial: true,
       });
       scene.add(spark);
 
       const splat = new SplatMesh({
         url: splatUrl,
+        paged: splatPaged,
         editable: true,
         raycastable: true,
         minRaycastOpacity: 0.5,
@@ -290,17 +344,18 @@ export default function Walker({
       splat.initialized
         .then(() => {
           if (disposed) return;
-          spark.maxPixelRadius = 512;
-          spark.maxStdDev = Math.sqrt(8);
           spark.falloff = 1;
-          spark.lodRenderScale = 2.5;
+          setSplatLoading(false);
           // splat loaded
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!disposed) setSplatLoading(false);
+        });
 
       // === Collider Mesh ===
 
       let colliderMesh: THREE.Mesh | null = null;
+      const colliderWorldBounds = new THREE.Box3();
 
       if (colliderMeshUrl) {
         try {
@@ -320,6 +375,7 @@ export default function Walker({
             // Add the full GLTF scene root — preserves parent transforms
             scene.add(result.root);
             result.root.updateMatrixWorld(true);
+            colliderWorldBounds.setFromObject(colliderMesh);
             meshRef.current = colliderMesh;
           }
         } catch (e) {
@@ -355,8 +411,10 @@ export default function Walker({
 
       // Camera state
       let camYaw = 0;
-      let camPitch = 0.4;
-      let camDist = 3.0;
+      let camPitch = CAMERA_NECK_PITCH;
+      let camDist = CAMERA_NECK_DISTANCE;
+      const orbitTarget = new THREE.Vector3();
+      let orbitTargetInit = false;
 
       // World→local bone transform (same as working /character demo)
       const _wp = new THREE.Vector3();
@@ -400,6 +458,7 @@ export default function Walker({
         const center = new THREE.Vector3();
         bb.getCenter(center);
         colliderMesh.updateMatrixWorld(true);
+        colliderWorldBounds.setFromObject(colliderMesh);
         colliderMesh.localToWorld(center);
         localAnchor.copy(center);
         physX = center.x;
@@ -413,6 +472,278 @@ export default function Walker({
         );
         console.log("[walker] rapier physics ready, spawn:", center.x.toFixed(3), center.y.toFixed(3), center.z.toFixed(3));
       }
+
+      // === Portable artifacts ===
+
+      const ARTIFACT_HALF = 0.075;
+      const ARTIFACT_PICKUP_RADIUS = 0.5;
+      const ARTIFACT_PICKUP_MS = 420;
+      const ARTIFACT_DROP_MS = 320;
+      const DELIVERY_RADIUS = 0.38;
+      const artifactGeometry = new THREE.BoxGeometry(
+        ARTIFACT_HALF * 2,
+        ARTIFACT_HALF * 2,
+        ARTIFACT_HALF * 2,
+      );
+      const artifactHaloGeometry = new THREE.TorusGeometry(ARTIFACT_HALF * 1.65, 0.006, 8, 36);
+      const artifactFocusGeometry = new THREE.TorusGeometry(ARTIFACT_HALF * 2.25, 0.004, 8, 44);
+      const artifactCapGeometry = new THREE.SphereGeometry(ARTIFACT_HALF * 0.45, 16, 16);
+      const artifactPalette = [
+        { id: "relay", label: "Relay", color: 0x36d399, offset: new THREE.Vector3(0.55, 0.28, -0.4) },
+        { id: "core", label: "Core", color: 0x60a5fa, offset: new THREE.Vector3(-0.5, 0.32, -0.62) },
+        { id: "seed", label: "Seed", color: 0xfbbf24, offset: new THREE.Vector3(0.15, 0.36, 0.58) },
+      ];
+      const artifacts: WalkArtifact[] = [];
+      const artifactById = new Map<string, WalkArtifact>();
+      let selectedArtifactId: string | null = null;
+      let carriedArtifactId: string | null = null;
+      let deliveredCount = 0;
+      let lastDeliveredCount = -1;
+      let carryBoneCandidates = ["HeadSite", "Head", "RightHandSite", "RightHand"];
+
+      const groundProbeRaycaster = new THREE.Raycaster();
+      const groundProbeOrigin = new THREE.Vector3();
+      const groundProbeDirection = new THREE.Vector3(0, -1, 0);
+      const groundProbeTargets: THREE.Object3D[] = colliderMesh ? [colliderMesh] : [];
+      const projectToColliderGround = (
+        position: THREE.Vector3,
+        objectHalfHeight = 0,
+        lift = 0.01,
+      ) => {
+        if (!colliderMesh || colliderWorldBounds.isEmpty()) return position.clone();
+        const probeTop = Number.isFinite(colliderWorldBounds.max.y)
+          ? colliderWorldBounds.max.y + 4
+          : position.y + 8;
+        const probeDepth = Math.max(
+          12,
+          Number.isFinite(colliderWorldBounds.max.y) && Number.isFinite(colliderWorldBounds.min.y)
+            ? colliderWorldBounds.max.y - colliderWorldBounds.min.y + 8
+            : 12,
+        );
+        const origSide = (colliderMesh.material as THREE.Material).side;
+        (colliderMesh.material as THREE.Material).side = THREE.DoubleSide;
+        groundProbeOrigin.set(position.x, probeTop, position.z);
+        groundProbeRaycaster.set(groundProbeOrigin, groundProbeDirection);
+        groundProbeRaycaster.far = probeDepth;
+        const hits = groundProbeRaycaster.intersectObjects(groundProbeTargets, true);
+        (colliderMesh.material as THREE.Material).side = origSide;
+        if (hits.length === 0) return position.clone();
+        const hitY = groundProbeOrigin.y - hits[0].distance;
+        const grounded = new THREE.Vector3(position.x, hitY + objectHalfHeight + lift, position.z);
+        return grounded;
+      };
+
+      const deliveryPosition = projectToColliderGround(
+        localAnchor.clone().add(new THREE.Vector3(0.85, 0, 0.75)),
+        0,
+        0.018,
+      );
+      const deliveryMaterial = new THREE.MeshBasicMaterial({
+        color: 0x36d399,
+        transparent: true,
+        opacity: 0.58,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const deliveryFillMaterial = new THREE.MeshBasicMaterial({
+        color: 0x36d399,
+        transparent: true,
+        opacity: 0.08,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const deliveryBeaconMaterial = new THREE.MeshBasicMaterial({
+        color: 0x36d399,
+        transparent: true,
+        opacity: 0.18,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const deliveryZone = new THREE.Group();
+      const deliveryRing = new THREE.Mesh(
+        new THREE.TorusGeometry(DELIVERY_RADIUS, 0.01, 8, 64),
+        deliveryMaterial,
+      );
+      deliveryRing.rotation.x = Math.PI / 2;
+      const deliveryFill = new THREE.Mesh(
+        new THREE.CircleGeometry(DELIVERY_RADIUS * 0.95, 64),
+        deliveryFillMaterial,
+      );
+      deliveryFill.rotation.x = -Math.PI / 2;
+      const deliveryBeacon = new THREE.Mesh(
+        new THREE.CylinderGeometry(DELIVERY_RADIUS * 0.72, DELIVERY_RADIUS * 0.72, 0.5, 40, 1, true),
+        deliveryBeaconMaterial,
+      );
+      deliveryBeacon.position.y = 0.25;
+      deliveryRing.renderOrder = 1200;
+      deliveryFill.renderOrder = 1199;
+      deliveryBeacon.renderOrder = 1198;
+      deliveryZone.position.copy(deliveryPosition);
+      deliveryZone.add(deliveryFill, deliveryRing, deliveryBeacon);
+      scene.add(deliveryZone);
+
+      const setArtifactUserData = (object: THREE.Object3D, id: string) => {
+        object.userData.walkArtifactId = id;
+        for (const child of object.children) setArtifactUserData(child, id);
+      };
+
+      for (const spec of artifactPalette) {
+        const group = new THREE.Group();
+        const initial = projectToColliderGround(
+          localAnchor.clone().add(new THREE.Vector3(spec.offset.x, 0, spec.offset.z)),
+          ARTIFACT_HALF,
+          0.025,
+        );
+        group.position.copy(initial);
+
+        const coreMaterial = new THREE.MeshStandardMaterial({
+          color: spec.color,
+          emissive: spec.color,
+          emissiveIntensity: 0.3,
+          roughness: 0.35,
+          metalness: 0.2,
+        });
+        const haloMaterial = new THREE.MeshBasicMaterial({
+          color: spec.color,
+          transparent: true,
+          opacity: 0.55,
+          depthWrite: false,
+        });
+        const focusMaterial = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+        });
+        const capMaterial = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          emissive: 0xffffff,
+          emissiveIntensity: 0.12,
+          roughness: 0.25,
+        });
+
+        const core = new THREE.Mesh(artifactGeometry, coreMaterial);
+        const halo = new THREE.Mesh(artifactHaloGeometry, haloMaterial);
+        halo.rotation.x = Math.PI / 2;
+        const focus = new THREE.Mesh(artifactFocusGeometry, focusMaterial);
+        focus.rotation.x = Math.PI / 2;
+        const cap = new THREE.Mesh(artifactCapGeometry, capMaterial);
+        cap.position.y = ARTIFACT_HALF * 1.15;
+        group.add(core, halo, focus, cap);
+        setArtifactUserData(group, spec.id);
+        scene.add(group);
+
+        const body = physics?.createArtifactBox({
+          x: initial.x,
+          y: initial.y,
+          z: initial.z,
+          halfExtents: { x: ARTIFACT_HALF, y: ARTIFACT_HALF, z: ARTIFACT_HALF },
+        }) ?? null;
+
+        const artifact: WalkArtifact = {
+          id: spec.id,
+          label: spec.label,
+          group,
+          coreMaterial,
+          haloMaterial,
+          focusMaterial,
+          body,
+          state: "ground",
+          transitionFrom: new THREE.Vector3(),
+          transitionTo: new THREE.Vector3(),
+          transitionStart: 0,
+          transitionDuration: 1,
+          settleUntil: 0,
+          delivered: false,
+        };
+        artifacts.push(artifact);
+        artifactById.set(spec.id, artifact);
+      }
+
+      // === Movable ramp ===
+
+      const RAMP_LENGTH = 0.72;
+      const RAMP_WIDTH = 0.34;
+      const RAMP_HEIGHT = 0.08;
+      const rampPosition = projectToColliderGround(
+        localAnchor.clone().add(new THREE.Vector3(-0.85, 0, 0.55)),
+        0,
+        0.018,
+      );
+      const rampGroup = new THREE.Group();
+      rampGroup.position.copy(rampPosition);
+      rampGroup.userData.walkRamp = true;
+
+      const rampGeometry = new THREE.BoxGeometry(RAMP_WIDTH, RAMP_HEIGHT, RAMP_LENGTH);
+      const rampMaterial = new THREE.MeshStandardMaterial({
+        color: 0xf8fafc,
+        emissive: 0x0ea5e9,
+        emissiveIntensity: 0.08,
+        roughness: 0.58,
+        metalness: 0.12,
+      });
+      const rampMesh = new THREE.Mesh(rampGeometry, rampMaterial);
+      const rampOutline = new THREE.Mesh(
+        new THREE.BoxGeometry(RAMP_WIDTH * 1.08, 0.018, RAMP_LENGTH * 1.04),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.16,
+          depthWrite: false,
+        }),
+      );
+      rampOutline.position.y = RAMP_HEIGHT / 2 + 0.012;
+      rampOutline.rotation.x = Math.PI / 2;
+      rampOutline.visible = false;
+      rampGroup.add(rampMesh, rampOutline);
+      scene.add(rampGroup);
+
+      const rampQuat = new THREE.Quaternion().setFromEuler(rampGroup.rotation);
+      const ramp: WalkRamp = {
+        group: rampGroup,
+        body: physics?.createRamp({
+          x: rampPosition.x,
+          y: rampPosition.y + RAMP_HEIGHT / 2,
+          z: rampPosition.z,
+          halfExtents: { x: RAMP_WIDTH / 2, y: RAMP_HEIGHT / 2, z: RAMP_LENGTH / 2 },
+          rotation: { x: rampQuat.x, y: rampQuat.y, z: rampQuat.z, w: rampQuat.w },
+        }) ?? null,
+        selected: false,
+      };
+
+      const placeRamp = (point: THREE.Vector3) => {
+        const grounded = projectToColliderGround(point, 0, 0.018);
+        ramp.group.position.copy(grounded);
+        ramp.group.updateMatrixWorld(true);
+        const q = new THREE.Quaternion().setFromEuler(ramp.group.rotation);
+        ramp.body?.dropAt(
+          grounded.x,
+          grounded.y + RAMP_HEIGHT + 0.08,
+          grounded.z,
+          { x: q.x, y: q.y, z: q.z, w: q.w },
+        );
+      };
+
+      const setDeliveryGameEnabled = (enabled: boolean) => {
+        deliveryZone.visible = enabled;
+        for (const artifact of artifacts) {
+          artifact.group.visible = enabled;
+          artifact.body?.setPhysicsEnabled(enabled && artifact.state !== "carried");
+        }
+        ramp.group.visible = enabled;
+        ramp.body?.setPhysicsEnabled(enabled);
+        if (!enabled) {
+          const selected = selectedArtifactId ? artifactById.get(selectedArtifactId) : null;
+          if (selected?.state === "selected") selected.state = "ground";
+          selectedArtifactId = null;
+          carriedArtifactId = null;
+          ramp.selected = false;
+          rampOutline.visible = false;
+          setRampSelectedUI(false);
+        }
+      };
+      setDeliveryGameEnabled(deliveryModeRef.current);
+      deliveryRuntimeRef.current = { setEnabled: setDeliveryGameEnabled };
 
       // --- Character loader (same pattern as character/page.tsx) ---
       const doLoadCharacter = async (def: CharacterDef) => {
@@ -493,6 +824,10 @@ export default function Walker({
         setStyles(locoEngine.getStyles());
         setActiveStyle(def.defaultStyle);
         setActiveChar(def.label);
+        carryBoneCandidates =
+          def.label === "Geno"
+            ? ["RightHand", "RightHandSite", "Head", "HeadSite"]
+            : ["HeadSite", "Head", "RightHandSite", "RightHand"];
         setCharLoading(false);
         console.log(`[walker] loaded ${def.label}`);
       };
@@ -509,6 +844,46 @@ export default function Walker({
 
       const raycaster = new THREE.Raycaster();
       const ndc = new THREE.Vector2();
+
+      const artifactHitRoots = artifacts.map((item) => item.group);
+
+      const findArtifactId = (object: THREE.Object3D): string | null => {
+        let current: THREE.Object3D | null = object;
+        while (current) {
+          const id = current.userData.walkArtifactId;
+          if (typeof id === "string") return id;
+          current = current.parent;
+        }
+        return null;
+      };
+
+      const raycastArtifact = (
+        ndcX: number,
+        ndcY: number
+      ): WalkArtifact | null => {
+        if (!deliveryModeRef.current) return null;
+        ndc.set(ndcX, ndcY);
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObjects(artifactHitRoots, true);
+        for (const hit of hits) {
+          const id = findArtifactId(hit.object);
+          if (!id) continue;
+          const artifact = artifactById.get(id);
+          if (artifact && artifact.state !== "carried" && !artifact.delivered) return artifact;
+        }
+        return null;
+      };
+
+      const raycastRamp = (
+        ndcX: number,
+        ndcY: number,
+      ): WalkRamp | null => {
+        if (!deliveryModeRef.current) return null;
+        ndc.set(ndcX, ndcY);
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObject(ramp.group, true);
+        return hits.length > 0 ? ramp : null;
+      };
 
       const raycastMesh = (
         ndcX: number,
@@ -626,6 +1001,9 @@ export default function Walker({
       const PITCH_MAX = Math.PI / 2 - 0.05;
       let dragging = false;
       let painting = false;
+      let pointerDownX = 0;
+      let pointerDownY = 0;
+      let pointerMoved = false;
 
       const doPaint = (e: MouseEvent) => {
         const rect = canvas.getBoundingClientRect();
@@ -639,6 +1017,104 @@ export default function Walker({
         paintAt(cx * 2 - 1, -(cy * 2 - 1), edit);
       };
 
+      const getCharacterPosition = () => new THREE.Vector3(physX, physY, physZ);
+
+      const getCarryPosition = () => {
+        const carry = new THREE.Vector3(physX, physY + ARTIFACT_HALF * 2.4, physZ);
+        for (const name of carryBoneCandidates) {
+          const bone = boneByName.get(name);
+          if (!bone) continue;
+          bone.updateMatrixWorld(true);
+          bone.getWorldPosition(carry);
+          carry.y += ARTIFACT_HALF * 0.65;
+          return carry;
+        }
+        return carry;
+      };
+
+      const pickUpArtifact = (artifact: WalkArtifact) => {
+        selectedArtifactId = artifact.id;
+        carriedArtifactId = null;
+        artifact.state = "pickup";
+        artifact.settleUntil = 0;
+        const carry = getCarryPosition();
+        artifact.body?.setPhysicsEnabled(false);
+        artifact.transitionFrom.copy(artifact.group.position);
+        artifact.transitionTo.copy(carry);
+        artifact.transitionStart = performance.now();
+        artifact.transitionDuration = ARTIFACT_PICKUP_MS;
+      };
+
+      const placeCarriedArtifact = (point: THREE.Vector3) => {
+        if (!carriedArtifactId) return;
+        const artifact = artifactById.get(carriedArtifactId);
+        if (!artifact) return;
+        const releaseY = point.y + ARTIFACT_HALF + 0.025;
+        artifact.state = "settle";
+        artifact.transitionFrom.copy(artifact.group.position);
+        artifact.transitionTo.set(point.x, releaseY, point.z);
+        artifact.transitionStart = performance.now();
+        artifact.transitionDuration = ARTIFACT_DROP_MS;
+        artifact.settleUntil = artifact.transitionStart + ARTIFACT_DROP_MS + 500;
+        selectedArtifactId = artifact.id;
+        carriedArtifactId = null;
+      };
+
+      const selectArtifact = (artifact: WalkArtifact) => {
+        if (carriedArtifactId || artifact.delivered) return;
+        selectedArtifactId = artifact.id;
+        artifact.state = "selected";
+        const dist = artifact.group.position.distanceTo(getCharacterPosition());
+        if (dist <= ARTIFACT_PICKUP_RADIUS) pickUpArtifact(artifact);
+      };
+
+      const handleSceneClick = (e: MouseEvent) => {
+        const rect = canvas.getBoundingClientRect();
+        const cx = (e.clientX - rect.left) / rect.width;
+        const cy = (e.clientY - rect.top) / rect.height;
+        const ndcX = cx * 2 - 1;
+        const ndcY = -(cy * 2 - 1);
+
+        if (!deliveryModeRef.current) return;
+
+        if (carriedArtifactId) {
+          const hit = raycastMesh(ndcX, ndcY) ?? raycastSplat(ndcX, ndcY);
+          if (hit) placeCarriedArtifact(hit);
+          return;
+        }
+
+        if (ramp.selected) {
+          const hit = raycastMesh(ndcX, ndcY) ?? raycastSplat(ndcX, ndcY);
+          if (hit) {
+            placeRamp(hit);
+            ramp.selected = false;
+            rampOutline.visible = false;
+            setRampSelectedUI(false);
+          }
+          return;
+        }
+
+        if (raycastRamp(ndcX, ndcY)) {
+          ramp.selected = true;
+          rampOutline.visible = true;
+          setRampSelectedUI(true);
+          return;
+        }
+
+        const artifact = raycastArtifact(ndcX, ndcY);
+        if (artifact) {
+          selectArtifact(artifact);
+          return;
+        }
+
+        const selected = selectedArtifactId ? artifactById.get(selectedArtifactId) : null;
+        if (selected?.state === "selected") selected.state = "ground";
+        selectedArtifactId = null;
+        ramp.selected = false;
+        rampOutline.visible = false;
+        setRampSelectedUI(false);
+      };
+
       const onMouseDown = (e: MouseEvent) => {
         if (e.button !== 0) return;
         if (paintModeRef.current) {
@@ -646,12 +1122,17 @@ export default function Walker({
           doPaint(e);
           return;
         }
+        pointerDownX = e.clientX;
+        pointerDownY = e.clientY;
+        pointerMoved = false;
         dragging = true;
       };
       const onMouseUp = (e: MouseEvent) => {
         if (e.button !== 0) return;
+        const wasClick = dragging && !pointerMoved;
         painting = false;
         dragging = false;
+        if (wasClick) handleSceneClick(e);
       };
       const onMouseMove = (e: MouseEvent) => {
         if (painting && paintModeRef.current) {
@@ -659,6 +1140,12 @@ export default function Walker({
           return;
         }
         if (!dragging) return;
+        if (
+          Math.abs(e.clientX - pointerDownX) > 4 ||
+          Math.abs(e.clientY - pointerDownY) > 4
+        ) {
+          pointerMoved = true;
+        }
         camYaw -= e.movementX * ORBIT_SENS;
         camPitch += e.movementY * ORBIT_SENS;
         if (camPitch < PITCH_MIN) camPitch = PITCH_MIN;
@@ -667,8 +1154,8 @@ export default function Walker({
       const onWheel = (e: WheelEvent) => {
         e.preventDefault();
         camDist *= 1 + e.deltaY * 0.001;
-        if (camDist < 0.5) camDist = 0.5;
-        if (camDist > 20) camDist = 20;
+        if (camDist < CAMERA_MIN_DISTANCE) camDist = CAMERA_MIN_DISTANCE;
+        if (camDist > CAMERA_MAX_DISTANCE) camDist = CAMERA_MAX_DISTANCE;
       };
 
       canvas.addEventListener("mousedown", onMouseDown);
@@ -716,6 +1203,7 @@ export default function Walker({
         if (!mount) return;
         camera.aspect = mount.clientWidth / mount.clientHeight;
         camera.updateProjectionMatrix();
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, WALKER_MAX_PIXEL_RATIO));
         renderer.setSize(mount.clientWidth, mount.clientHeight);
       };
       window.addEventListener("resize", onResize);
@@ -723,12 +1211,155 @@ export default function Walker({
       // === Animation Loop ===
 
       const _charWorldPos = new THREE.Vector3();
+      const _artifactPos = new THREE.Vector3();
+      const _rampQuat = new THREE.Quaternion();
       let last = performance.now();
+
+      const getCameraAnchorWorldPosition = (target: THREE.Vector3) => {
+        for (const name of CAMERA_ANCHOR_BONES) {
+          const bone = boneByName.get(name);
+          if (!bone) continue;
+          bone.getWorldPosition(target);
+          return target;
+        }
+        target.set(physX, physY + CAMERA_ANCHOR_FALLBACK_Y, physZ);
+        return target;
+      };
+
+      const easeInOut = (t: number) =>
+        t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+      const finishDeliveryIfNeeded = (artifact: WalkArtifact) => {
+        if (artifact.delivered) return;
+        const flatDist = Math.hypot(
+          artifact.transitionTo.x - deliveryPosition.x,
+          artifact.transitionTo.z - deliveryPosition.z,
+        );
+        if (flatDist > DELIVERY_RADIUS) return;
+        artifact.delivered = true;
+        deliveredCount += 1;
+        setDeliveryDelivered(deliveredCount);
+        artifact.coreMaterial.color.setHex(0xffffff);
+        artifact.coreMaterial.emissive.setHex(0x36d399);
+        artifact.haloMaterial.color.setHex(0xffffff);
+        artifact.focusMaterial.color.setHex(0x36d399);
+      };
+
+      const syncArtifacts = (now: number, dt: number) => {
+        if (!deliveryModeRef.current) return;
+        const selected = selectedArtifactId ? artifactById.get(selectedArtifactId) : null;
+        if (selected && selected.state === "selected") {
+          const dist = selected.group.position.distanceTo(getCharacterPosition());
+          if (dist <= ARTIFACT_PICKUP_RADIUS) pickUpArtifact(selected);
+        }
+
+        const carry = carriedArtifactId ? artifactById.get(carriedArtifactId) : null;
+        const carryPosition = carry ? getCarryPosition() : null;
+        const followAlpha = 1 - Math.exp(-dt * 18);
+
+        for (const artifact of artifacts) {
+          if (artifact.state === "pickup") {
+            const t = Math.min(
+              1,
+              (now - artifact.transitionStart) / artifact.transitionDuration,
+            );
+            artifact.transitionTo.copy(getCarryPosition());
+            artifact.group.position.lerpVectors(
+              artifact.transitionFrom,
+              artifact.transitionTo,
+              easeInOut(t),
+            );
+            if (t >= 1) {
+              artifact.state = "carried";
+              carriedArtifactId = artifact.id;
+            }
+          } else if (artifact.state === "settle") {
+            if (artifact.transitionDuration > 0) {
+              const t = Math.min(
+                1,
+                (now - artifact.transitionStart) / artifact.transitionDuration,
+              );
+              artifact.group.position.lerpVectors(
+                artifact.transitionFrom,
+                artifact.transitionTo,
+                easeInOut(t),
+              );
+              if (t >= 1 && artifact.body) {
+                artifact.body.setPhysicsEnabled(true);
+                artifact.body.setDynamicPosition(
+                  artifact.transitionTo.x,
+                  artifact.transitionTo.y,
+                  artifact.transitionTo.z,
+                );
+                artifact.body.setDynamic({ x: 0, y: -0.12, z: 0 });
+                artifact.transitionDuration = 0;
+                finishDeliveryIfNeeded(artifact);
+              }
+            } else if (artifact.body) {
+              const p = artifact.body.getPosition();
+              _artifactPos.set(p.x, p.y, p.z);
+              artifact.group.position.lerp(_artifactPos, followAlpha);
+            }
+          } else if (artifact === carry && carryPosition) {
+            artifact.group.position.lerp(carryPosition, followAlpha);
+          } else if (artifact.body) {
+            const p = artifact.body.getPosition();
+            _artifactPos.set(p.x, p.y, p.z);
+            artifact.group.position.copy(_artifactPos);
+          }
+
+          if (artifact.state === "settle" && now >= artifact.settleUntil) {
+            artifact.state =
+              selectedArtifactId === artifact.id && !artifact.delivered ? "selected" : "ground";
+            artifact.settleUntil = 0;
+          }
+
+          const isSelected =
+            selectedArtifactId === artifact.id ||
+            carriedArtifactId === artifact.id ||
+            artifact.state === "selected";
+          const pulse = 1 + Math.sin(now * 0.007) * 0.08;
+          artifact.coreMaterial.emissiveIntensity = isSelected ? 0.62 : 0.3;
+          artifact.haloMaterial.opacity = isSelected ? 0.9 : 0.55;
+          artifact.focusMaterial.opacity = isSelected ? 0.6 : 0;
+          artifact.group.rotation.y += dt * (artifact.state === "carried" ? 1.5 : 0.45);
+          artifact.group.scale.setScalar(isSelected ? pulse : 1);
+        }
+
+        const completion = deliveredCount / artifacts.length;
+        if (deliveredCount !== lastDeliveredCount) {
+          lastDeliveredCount = deliveredCount;
+          setDeliveryDelivered(deliveredCount);
+        }
+        deliveryMaterial.opacity = 0.45 + completion * 0.45;
+        deliveryFillMaterial.opacity = 0.08 + completion * 0.2;
+        deliveryBeaconMaterial.opacity = 0.14 + completion * 0.24;
+        deliveryZone.scale.setScalar(1 + Math.sin(now * 0.005) * (0.025 + completion * 0.03));
+      };
+
+      const syncRamp = () => {
+        if (!deliveryModeRef.current) return;
+        const pose = ramp.body?.getPosition();
+        if (!pose || ramp.selected) return;
+        ramp.group.position.set(
+          pose.translation.x,
+          pose.translation.y - RAMP_HEIGHT / 2,
+          pose.translation.z,
+        );
+        _rampQuat.set(
+          pose.rotation.x,
+          pose.rotation.y,
+          pose.rotation.z,
+          pose.rotation.w,
+        );
+        ramp.group.quaternion.copy(_rampQuat);
+      };
 
       renderer.setAnimationLoop(() => {
         const now = performance.now();
         const dt = Math.min((now - last) / 1000, 0.1);
         last = now;
+        let physicsMoved = false;
 
         // === WASD → drive locomotion engine ===
         if (locoEngine && locoEngine.ready && characterRoot?.visible) {
@@ -798,6 +1429,7 @@ export default function Walker({
             physX = result.x;
             physY = result.y;
             physZ = result.z;
+            physicsMoved = true;
           } else {
             // Fallback: no physics, just track hips position directly
             physX = localAnchor.x + hipsPos[0] * CHAR_SCALE;
@@ -822,22 +1454,32 @@ export default function Walker({
           characterRoot.position.set(physX, physY, physZ);
 
           // === Camera ===
-          if (cameraFollowRef.current) {
-            characterContainer.updateMatrixWorld(false);
-            _charWorldPos.copy(characterRoot.position);
-            characterContainer.localToWorld(_charWorldPos);
-
-            const camOffX = camDist * Math.cos(camPitch) * Math.sin(camYaw);
-            const camOffY = camDist * Math.sin(camPitch);
-            const camOffZ = camDist * Math.cos(camPitch) * Math.cos(camYaw);
-            camera.position.set(
-              _charWorldPos.x + camOffX,
-              _charWorldPos.y + camOffY,
-              _charWorldPos.z + camOffZ,
-            );
-            camera.lookAt(_charWorldPos.x, _charWorldPos.y, _charWorldPos.z);
+          characterContainer.updateMatrixWorld(false);
+          getCameraAnchorWorldPosition(_charWorldPos);
+          if (!orbitTargetInit) {
+            orbitTarget.copy(_charWorldPos);
+            orbitTargetInit = true;
+          } else if (cameraFollowRef.current) {
+            const followDeltaSq = orbitTarget.distanceToSquared(_charWorldPos);
+            if (followDeltaSq > CAMERA_FOLLOW_DEADBAND_M * CAMERA_FOLLOW_DEADBAND_M) {
+              orbitTarget.lerp(_charWorldPos, 1 - Math.exp(-dt * CAMERA_FOLLOW_HZ));
+            }
           }
+
+          const camOffX = camDist * Math.cos(camPitch) * Math.sin(camYaw);
+          const camOffY = camDist * Math.sin(camPitch);
+          const camOffZ = camDist * Math.cos(camPitch) * Math.cos(camYaw);
+          camera.position.set(
+            orbitTarget.x + camOffX,
+            orbitTarget.y + camOffY,
+            orbitTarget.z + camOffZ,
+          );
+          camera.lookAt(orbitTarget.x, orbitTarget.y, orbitTarget.z);
         }
+
+        if (physics && !physicsMoved) physics.step();
+        syncArtifacts(now, dt);
+        syncRamp();
 
         renderer.render(scene, camera);
       });
@@ -854,6 +1496,11 @@ export default function Walker({
         window.removeEventListener("mouseup", onMouseUp);
         window.removeEventListener("mousemove", onMouseMove);
         canvas.removeEventListener("wheel", onWheel);
+        if (deliveryRuntimeRef.current?.setEnabled === setDeliveryGameEnabled) {
+          deliveryRuntimeRef.current = null;
+        }
+        for (const artifact of artifacts) artifact.body?.dispose();
+        ramp.body?.dispose();
         physics?.dispose();
         splat.dispose();
         renderer.setAnimationLoop(null);
@@ -866,7 +1513,7 @@ export default function Walker({
       disposed = true;
       cleanup?.();
     };
-  }, [splatUrl, colliderMeshUrl, metricScale]);
+  }, [splatUrl, splatPaged, colliderMeshUrl, metricScale]);
 
   const cycleViewMode = useCallback(() => {
     const next = ((viewModeRef.current + 1) % 3) as 0 | 1 | 2;
@@ -875,60 +1522,6 @@ export default function Walker({
     if (splatRef.current) splatRef.current.visible = next === 1 || next === 2;
     setViewMode(next);
   }, []);
-
-  const onQuickSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = quickIntent.trim();
-    const api = apiRef.current;
-    if (!text || quickSubmitting || !api) return;
-    setQuickSubmitting(true);
-    setError(null);
-    try {
-      const snap = api.snapshot();
-      const res = await fetch(`${API_BASE}/edit-intent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          screenshot: snap.dataUrl,
-          intent: text,
-          width: snap.width,
-          height: snap.height,
-          userPrompt: userPrompt ?? null,
-          sceneCaption: sceneCaption ?? null,
-        }),
-      });
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-      const data = (await res.json()) as {
-        x?: number;
-        y?: number;
-        box?: { nx1: number; ny1: number; nx2: number; ny2: number };
-        color?: string | null;
-        op?: string;
-        size?: string;
-        reason?: string | null;
-        usage?: Record<string, unknown> | null;
-        error?: string;
-      };
-      if (data.error) throw new Error(data.error);
-      if (typeof data.x !== "number" || typeof data.y !== "number" || !data.box) {
-        throw new Error("invalid response");
-      }
-      const edit: EditOp = {
-        color: data.color ?? null,
-        op: data.op ?? "recolor",
-        size: data.size ?? "medium",
-      };
-      const cx = (data.box.nx1 + data.box.nx2) / 2;
-      const cy = (data.box.ny1 + data.box.ny2) / 2;
-      api.paintAt(cx * 2 - 1, -(cy * 2 - 1), edit);
-      setLastEdit({ reason: data.reason ?? null, usage: data.usage ?? null });
-      setQuickIntent("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setQuickSubmitting(false);
-    }
-  };
 
   // ── Edit intent submit ──
 
@@ -991,44 +1584,6 @@ export default function Walker({
     }
   };
 
-  // ── Ask the world ──
-
-  const onAskSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = question.trim();
-    const api = apiRef.current;
-    if (!text || askSubmitting || !api) return;
-    setAskSubmitting(true);
-    setAnswer(null);
-    setError(null);
-    try {
-      const snap = api.snapshot();
-      const res = await fetch(`${API_BASE}/ask-world`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          screenshot: snap.dataUrl,
-          question: text,
-          width: snap.width,
-          height: snap.height,
-          sceneCaption: sceneCaption ?? null,
-        }),
-      });
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-      const data = (await res.json()) as {
-        answer?: string;
-        error?: string;
-      };
-      if (data.error) throw new Error(data.error);
-      setAnswer(data.answer ?? "no answer");
-      setQuestion("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setAskSubmitting(false);
-    }
-  };
-
   return (
     <>
       <div
@@ -1037,8 +1592,15 @@ export default function Walker({
         style={paintMode ? { cursor: "crosshair" } : undefined}
       />
 
+      {(splatLoading || charLoading) && (
+        <LoadingParticles
+          label={splatLoading ? "loading splat" : "loading character"}
+          className="z-30"
+        />
+      )}
+
       {/* HUD — always visible when menu is closed */}
-      {!menuOpen && (
+      {!menuOpen && !splatLoading && (
         <div style={HUD_FONT} className="pointer-events-none">
           {/* top-left: back */}
           <Link
@@ -1049,22 +1611,46 @@ export default function Walker({
             <IconArrowLeft />
           </Link>
 
-          {/* top-center: edit prompt */}
-          <form
-            onSubmit={onQuickSubmit}
-            className="pointer-events-auto absolute left-1/2 top-5 z-10 -translate-x-1/2"
-          >
-            <div className="flex h-12 w-[min(560px,calc(100vw-280px))] items-center gap-2 rounded-2xl border border-white/10 bg-black/55 px-4 backdrop-blur-md focus-within:border-white/25">
-              <input
-                type="text"
-                value={quickIntent}
-                onChange={(e) => setQuickIntent(e.target.value)}
-                placeholder={quickSubmitting ? "thinking…" : "describe a change…"}
-                disabled={quickSubmitting}
-                className="h-full flex-1 bg-transparent text-[14px] text-white placeholder:text-zinc-400 focus:outline-none disabled:opacity-50"
-              />
+          {/* top-right: delivery objective */}
+          {deliveryMode && (
+            <div className="absolute right-5 top-5 z-10">
+              <div className="rounded-2xl border border-white/10 bg-black/55 px-4 py-3 text-right backdrop-blur-md">
+                <div className="text-[10px] uppercase tracking-[0.16em] text-zinc-400">Delivered</div>
+                <div className="mt-1 text-[22px] leading-none text-white">
+                  {deliveryDelivered}/3
+                </div>
+                <div
+                  className={`mt-2 h-1.5 w-28 overflow-hidden rounded-full bg-white/10 ${
+                    deliveryDelivered === 3 ? "ring-1 ring-emerald-300/50" : ""
+                  }`}
+                >
+                  <div
+                    className="h-full rounded-full bg-emerald-300 transition-all duration-300"
+                    style={{ width: `${(deliveryDelivered / 3) * 100}%` }}
+                  />
+                </div>
+              </div>
             </div>
-          </form>
+          )}
+
+          {/* left-center: ramp placement state */}
+          {deliveryMode && rampSelectedUI && (
+            <div className="absolute left-5 top-1/2 z-10 -translate-y-1/2">
+              <div className="rounded-2xl border border-cyan-200/20 bg-black/55 px-4 py-3 backdrop-blur-md">
+                <div className="text-[10px] uppercase tracking-[0.16em] text-cyan-200">Ramp</div>
+                <div className="mt-1 text-[13px] text-white">Click floor to place</div>
+              </div>
+            </div>
+          )}
+
+          {deliveryMode && deliveryDelivered === 3 && (
+            <div className="absolute left-1/2 top-[88px] z-10 -translate-x-1/2">
+              <div className="rounded-2xl border border-emerald-200/25 bg-black/60 px-5 py-3 text-center backdrop-blur-md">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-emerald-200">Complete</div>
+                <div className="mt-1 text-[14px] text-white">All artifacts delivered</div>
+              </div>
+            </div>
+          )}
 
           {/* bottom-center: action tray */}
           <div className="pointer-events-auto absolute bottom-6 left-1/2 z-10 -translate-x-1/2">
@@ -1132,15 +1718,6 @@ export default function Walker({
               >
                 <IconCamera />
               </button>
-              <div className="mx-1 h-5 w-px bg-white/10" />
-              <button
-                onClick={() => { setMenuTab("ask"); setMenuOpen(true); }}
-                aria-label="ask"
-                title="ask the world"
-                className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-300 hover:bg-white/10 hover:text-white"
-              >
-                <IconMessage />
-              </button>
               <button
                 onClick={() => { setMenuTab("controls"); setMenuOpen(true); }}
                 aria-label="controls"
@@ -1164,7 +1741,7 @@ export default function Walker({
             if (e.target === e.currentTarget) setMenuOpen(false);
           }}
         >
-          <div className="w-[460px] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl">
+          <div className="h-[560px] w-[500px] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl">
             {/* tab bar */}
             <div className="flex items-center justify-between border-b border-white/10 px-2 py-2">
               <div className="flex items-center gap-1">
@@ -1179,14 +1756,14 @@ export default function Walker({
                   Edit
                 </button>
                 <button
-                  onClick={() => setMenuTab("ask")}
+                  onClick={() => setMenuTab("game")}
                   className={`rounded-md px-3 py-1.5 text-[13px] ${
-                    menuTab === "ask"
+                    menuTab === "game"
                       ? "bg-white/10 text-white"
                       : "text-zinc-400 hover:text-white"
                   }`}
                 >
-                  Ask
+                  Game
                 </button>
                 <button
                   onClick={() => setMenuTab("controls")}
@@ -1209,7 +1786,7 @@ export default function Walker({
             </div>
 
             {/* content */}
-            <div className="min-h-[200px] p-5">
+            <div className="h-[507px] p-5">
               {menuTab === "edit" && (
                 <div className="space-y-5">
                   {/* Paint mode toggle */}
@@ -1309,35 +1886,27 @@ export default function Walker({
                 </div>
               )}
 
-              {menuTab === "ask" && (
-                <form onSubmit={onAskSubmit}>
-                  <p className="mb-3 text-[12px] leading-relaxed text-zinc-400">
-                    Ask the world a question about what you see. It will look at your current view and answer.
-                  </p>
-                  <input
-                    type="text"
-                    value={question}
-                    onChange={(e) => setQuestion(e.target.value)}
-                    placeholder={askSubmitting ? "looking…" : "what is that structure?"}
-                    disabled={askSubmitting}
-                    autoFocus
-                    className="w-full rounded-lg border border-white/10 bg-white/5 px-3.5 py-2.5 text-[13px] text-white placeholder:text-zinc-500 focus:border-white/30 focus:outline-none disabled:opacity-50"
-                  />
-                  {error && menuTab === "ask" && (
-                    <div className="mt-3 text-[12px] text-red-400">{error}</div>
-                  )}
-                  {answer && !askSubmitting && (
-                    <div className="mt-4 text-[13px] leading-relaxed text-zinc-200">
-                      {answer}
-                    </div>
-                  )}
-                </form>
+              {menuTab === "game" && (
+                <div>
+                  <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Games</div>
+                  <button
+                    onClick={() => setDeliveryMode((enabled) => !enabled)}
+                    className={`flex w-full items-center justify-between rounded-lg border px-4 py-3 text-left transition ${
+                      deliveryMode
+                        ? "border-emerald-200/30 bg-emerald-300/15 text-emerald-100"
+                        : "border-white/10 bg-white/5 text-zinc-300 hover:border-white/20 hover:text-white"
+                    }`}
+                  >
+                    <span className="text-[14px] text-white">Artifact Delivery</span>
+                    <span className="text-[12px]">{deliveryMode ? "On" : "Off"}</span>
+                  </button>
+                </div>
               )}
 
               {menuTab === "controls" && (
-                <div className="space-y-5">
+                <div className="space-y-4">
                   {/* Keys */}
-                  <div className="space-y-2.5 text-[13px]">
+                  <div className="space-y-2 text-[13px]">
                     <div className="flex justify-between">
                       <span className="text-white">Walk</span>
                       <span className="text-zinc-400">wasd</span>
@@ -1357,6 +1926,10 @@ export default function Walker({
                     <div className="flex justify-between">
                       <span className="text-white">Mesh overlay</span>
                       <span className="text-zinc-400">m</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-white">Game options</span>
+                      <span className="text-zinc-400">Game tab</span>
                     </div>
                   </div>
 
