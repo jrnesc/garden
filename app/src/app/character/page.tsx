@@ -23,7 +23,8 @@ type CharacterDef = {
   defaultStyle: string;
 };
 
-const ONNX_BASE = `${API_BASE}/assets`;
+const ONNX_BASE =
+  process.env.NEXT_PUBLIC_API_URL ? `${API_BASE}/assets` : "";
 
 const CHARACTERS: CharacterDef[] = [
   { label: "Geno", glb: "/character.glb", onnx: `${ONNX_BASE}/locomotion.onnx`, data: "/locomotion-data.json", defaultStyle: "Neutral" },

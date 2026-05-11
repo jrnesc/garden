@@ -1,7 +1,7 @@
 "use client";
 
 import type * as THREE from "three";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type FormEvent } from "react";
 import { API_BASE } from "@/lib/api";
 import LoadingParticles from "@/components/LoadingParticles";
 import { loadColliderMesh } from "@/lib/collider";
@@ -12,20 +12,7 @@ import {
   type PhysicsRampBody,
   type PhysicsWorld,
 } from "@/lib/physics";
-import Link from "next/link";
-import {
-  IconArrowLeft,
-  IconBrush,
-  IconCamera,
-  IconClose,
-  IconGrid,
-  IconKeyboard,
-  IconTrash,
-  IconUndo,
-  HUD_FONT,
-  HUD_BOX_BASE,
-  HUD_BOX_SQUARE,
-} from "./hud-icons";
+import { WalkerHud, WalkerMenu, type WalkerMenuTab } from "./walker-ui";
 
 type CharacterDef = {
   label: string;
@@ -93,6 +80,17 @@ type WalkRamp = {
   selected: boolean;
 };
 
+type ChaseEnemy = {
+  group: THREE.Group;
+  position: THREE.Vector3;
+  velocity: THREE.Vector3;
+  radius: number;
+  speed: number;
+  engine: LocomotionEngine | null;
+  boneByName: Map<string, THREE.Bone>;
+  ready: boolean;
+};
+
 type WalkerHandle = {
   snapshot: () => { dataUrl: string; width: number; height: number };
   paintAt: (ndcX: number, ndcY: number, edit: EditOp) => number;
@@ -128,13 +126,20 @@ const SPARK_MAX_STD_DEV = Math.sqrt(4);
 const SPARK_MAX_PIXEL_RADIUS = 384;
 const WALKER_MAX_PIXEL_RATIO = 1.0;
 const CAMERA_FOLLOW_HZ = 5;
-const CAMERA_FOLLOW_DEADBAND_M = 0.0025;
+const CAMERA_FOLLOW_DEADBAND_M = 0.04;
 const CAMERA_NECK_PITCH = 0.24;
 const CAMERA_NECK_DISTANCE = 0.82;
 const CAMERA_MIN_DISTANCE = 0.28;
 const CAMERA_MAX_DISTANCE = 8;
 const CAMERA_ANCHOR_FALLBACK_Y = 0.42;
 const CAMERA_ANCHOR_BONES = ["Neck", "Head", "HeadSite", "Spine1", "Spine", "Hips"];
+const CHASE_MAX_RESEARCHERS = 3;
+const CHASE_RESEARCHER_UPDATE_STRIDE = 2;
+const CHASE_RESEARCHER_STYLE = "Neutral";
+const CHASE_PLAYER_RADIUS = 0.18;
+const CHASE_ENEMY_RADIUS = 0.22;
+const CHASE_INITIAL_SPAWN_DISTANCE = 4.5;
+const CHASE_WAVE_SPAWN_DISTANCE = 5.5;
 
 const COLOR_CSS: Record<string, string> = {
   red: "#e04040", blue: "#4040e0", green: "#40e040", yellow: "#e0e040",
@@ -197,7 +202,7 @@ export default function Walker({
   const cameraFollowRef = useRef(true);
   const [cameraFollowUI, setCameraFollowUI] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [menuTab, setMenuTab] = useState<"edit" | "game" | "controls">("edit");
+  const [menuTab, setMenuTab] = useState<WalkerMenuTab>("edit");
   const [activeChar, setActiveChar] = useState("Dog");
   const [activeStyle, setActiveStyle] = useState("Walk");
   const [activeSpeed, setActiveSpeed] = useState("Walk");
@@ -218,12 +223,18 @@ export default function Walker({
   const [deliveryMode, setDeliveryMode] = useState(false);
   const [deliveryDelivered, setDeliveryDelivered] = useState(0);
   const [rampSelectedUI, setRampSelectedUI] = useState(false);
+  const [chaseMode, setChaseMode] = useState(false);
+  const [chaseSurvived, setChaseSurvived] = useState(0);
+  const [chaseCount, setChaseCount] = useState(0);
+  const [chaseCaught, setChaseCaught] = useState(false);
   const [paintColor, setPaintColor] = useState("red");
   const [paintOp, setPaintOp] = useState("recolor");
   const [paintSize, setPaintSize] = useState("medium");
   const paintModeRef = useRef(false);
   const deliveryModeRef = useRef(false);
   const deliveryRuntimeRef = useRef<{ setEnabled: (enabled: boolean) => void } | null>(null);
+  const chaseModeRef = useRef(false);
+  const chaseRuntimeRef = useRef<{ setEnabled: (enabled: boolean) => void } | null>(null);
   const paintOpRef = useRef("recolor");
   const paintColorRef = useRef("red");
   const paintSizeRef = useRef("medium");
@@ -234,6 +245,10 @@ export default function Walker({
     deliveryModeRef.current = deliveryMode;
     deliveryRuntimeRef.current?.setEnabled(deliveryMode);
   }, [deliveryMode]);
+  useEffect(() => {
+    chaseModeRef.current = chaseMode;
+    chaseRuntimeRef.current?.setEnabled(chaseMode);
+  }, [chaseMode]);
   useEffect(() => { paintOpRef.current = paintOp; }, [paintOp]);
   useEffect(() => { paintColorRef.current = paintColor; }, [paintColor]);
   useEffect(() => { paintSizeRef.current = paintSize; }, [paintSize]);
@@ -368,7 +383,7 @@ export default function Walker({
               opacity: 0.4,
               transparent: true,
               depthWrite: false,
-              depthTest: false,
+              depthTest: true,
             });
             colliderMesh.renderOrder = 999;
             colliderMesh.visible = true;
@@ -449,6 +464,7 @@ export default function Walker({
       };
 
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
+      const { clone: cloneSkeleton } = await import("three/examples/jsm/utils/SkeletonUtils.js");
       const gltfLoader = new GLTFLoader();
 
       // --- Physics (once, tied to world not character) ---
@@ -1115,6 +1131,211 @@ export default function Walker({
         setRampSelectedUI(false);
       };
 
+      // === Zombie Chase game ===
+
+      let researcherTemplate: THREE.Object3D | null = null;
+      let researcherData: LocoData | null = null;
+      let researcherAssetsLoading: Promise<void> | null = null;
+      let chaseStartedAt = 0;
+      let chaseLastHudAt = 0;
+      let chaseNextSpawnAt = 0;
+      let chaseFrame = 0;
+      let chaseCaughtLocal = false;
+      const chaseEnemies: ChaseEnemy[] = [];
+      const chaseTmp = new THREE.Vector3();
+
+      const loadResearcherAssets = () => {
+        if (researcherTemplate && researcherData) return Promise.resolve();
+        if (researcherAssetsLoading) return researcherAssetsLoading;
+        researcherAssetsLoading = Promise.all([
+          gltfLoader.loadAsync("/character.glb"),
+          fetch("/locomotion-data.json"),
+        ]).then(async ([gltf, dataResp]) => {
+          if (disposed) return;
+          researcherTemplate = gltf.scene;
+          researcherTemplate.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const mesh = child as THREE.Mesh;
+              mesh.frustumCulled = false;
+              mesh.material = new THREE.MeshBasicMaterial({ color: 0xf4f4ed });
+            }
+          });
+          researcherData = (await dataResp.json()) as LocoData;
+        }).catch((error: unknown) => {
+          researcherAssetsLoading = null;
+          console.error("[walker] chase researcher load failed:", error);
+        });
+        return researcherAssetsLoading;
+      };
+
+      const clearChaseEnemies = () => {
+        for (const enemy of chaseEnemies) {
+          scene.remove(enemy.group);
+        }
+        chaseEnemies.length = 0;
+        setChaseCount(0);
+      };
+
+      const spawnChaseEnemy = (angle: number, distance: number, speed: number) => {
+        const player = getCharacterPosition();
+        const spawnDistance = Math.max(distance, CHASE_INITIAL_SPAWN_DISTANCE);
+        const position = new THREE.Vector3(
+          player.x + Math.cos(angle) * spawnDistance,
+          player.y,
+          player.z + Math.sin(angle) * spawnDistance,
+        );
+        const group = researcherTemplate
+          ? (cloneSkeleton(researcherTemplate) as THREE.Group)
+          : new THREE.Group();
+        const enemyBoneByName = new Map<string, THREE.Bone>();
+        group.traverse((child) => {
+          if ((child as THREE.SkinnedMesh).isSkinnedMesh) {
+            for (const bone of (child as THREE.SkinnedMesh).skeleton.bones) {
+              enemyBoneByName.set(bone.name, bone);
+            }
+          }
+        });
+        if (!researcherTemplate) {
+          const body = new THREE.Mesh(
+            new THREE.CapsuleGeometry(0.14, 0.5, 5, 10),
+            new THREE.MeshStandardMaterial({ color: 0xf4f4ed, roughness: 0.7 }),
+          );
+          body.position.y = 0.36;
+          group.add(body);
+          group.position.copy(position);
+        } else {
+          group.position.set(0, 0, 0);
+        }
+        scene.add(group);
+
+        const enemy: ChaseEnemy = {
+          group,
+          position,
+          velocity: new THREE.Vector3(),
+          radius: CHASE_ENEMY_RADIUS,
+          speed,
+          engine: null,
+          boneByName: enemyBoneByName,
+          ready: false,
+        };
+        chaseEnemies.push(enemy);
+        setChaseCount(chaseEnemies.length);
+
+        if (researcherData && enemyBoneByName.size > 0) {
+          const engine = new LocomotionEngine(researcherData);
+          enemy.engine = engine;
+          engine.setStyle(CHASE_RESEARCHER_STYLE);
+          engine.setRootPosition(position.x, position.z);
+          engine.loadModel(`${ONNX_BASE}/locomotion.onnx`)
+            .then(() => {
+              if (!disposed) enemy.ready = true;
+            })
+            .catch((error: unknown) => {
+              enemy.engine = null;
+              console.error("[walker] chase enemy locomotion failed:", error);
+            });
+        }
+      };
+
+      const resetChaseGame = () => {
+        clearChaseEnemies();
+        chaseStartedAt = performance.now();
+        chaseLastHudAt = 0;
+        chaseNextSpawnAt = 0;
+        chaseFrame = 0;
+        chaseCaughtLocal = false;
+        setChaseSurvived(0);
+        setChaseCaught(false);
+        for (let i = 0; i < 2; i++) {
+          spawnChaseEnemy((i / 2) * Math.PI * 2, CHASE_INITIAL_SPAWN_DISTANCE, 0.55);
+        }
+      };
+
+      const setChaseGameEnabled = (enabled: boolean) => {
+        if (enabled) {
+          void loadResearcherAssets().then(() => {
+            if (!disposed && chaseModeRef.current) resetChaseGame();
+          });
+        } else {
+          clearChaseEnemies();
+          setChaseSurvived(0);
+          setChaseCaught(false);
+          chaseCaughtLocal = false;
+        }
+      };
+      setChaseGameEnabled(chaseModeRef.current);
+      chaseRuntimeRef.current = { setEnabled: setChaseGameEnabled };
+
+      const syncChase = (now: number, dt: number) => {
+        if (!chaseModeRef.current || chaseCaughtLocal) return;
+        chaseFrame += 1;
+        const player = getCharacterPosition();
+        const elapsedSeconds = (now - chaseStartedAt) / 1000;
+        if (now - chaseLastHudAt > 100) {
+          chaseLastHudAt = now;
+          setChaseSurvived(elapsedSeconds);
+          setChaseCount(chaseEnemies.length);
+        }
+        if (elapsedSeconds > chaseNextSpawnAt && chaseEnemies.length < CHASE_MAX_RESEARCHERS) {
+          chaseNextSpawnAt = elapsedSeconds + Math.max(2.0, 4.5 - elapsedSeconds * 0.03);
+          spawnChaseEnemy(
+            Math.random() * Math.PI * 2,
+            CHASE_WAVE_SPAWN_DISTANCE,
+            0.56 + Math.min(elapsedSeconds * 0.012, 0.3),
+          );
+        }
+
+        for (let i = 0; i < chaseEnemies.length; i++) {
+          const enemy = chaseEnemies[i];
+          chaseTmp.copy(player).sub(enemy.position);
+          chaseTmp.y = 0;
+          if (chaseTmp.lengthSq() > 0.0001) chaseTmp.normalize().multiplyScalar(enemy.speed);
+          enemy.velocity.lerp(chaseTmp, 0.08);
+          const chaseSpeed = Math.max(enemy.velocity.length(), 0.001);
+          const dirX = enemy.velocity.x / chaseSpeed;
+          const dirZ = enemy.velocity.z / chaseSpeed;
+          if (
+            enemy.engine &&
+            enemy.ready &&
+            chaseFrame % CHASE_RESEARCHER_UPDATE_STRIDE === i % CHASE_RESEARCHER_UPDATE_STRIDE
+          ) {
+            enemy.engine.setMovement(
+              [dirX * enemy.speed * 1.7, 0, dirZ * enemy.speed * 1.7],
+              [dirX, 0, dirZ],
+            );
+            enemy.engine.update(dt * CHASE_RESEARCHER_UPDATE_STRIDE);
+            const rootPos = enemy.engine.getRootPosition();
+            enemy.position.set(rootPos[0], player.y, rootPos[2]);
+            const enemyBones = enemy.engine.getBoneData();
+            for (const boneFrame of enemyBones) {
+              const bone = enemy.boneByName.get(boneFrame.name);
+              if (!bone) continue;
+              applyWorldToBone(
+                bone,
+                boneFrame.position[0],
+                boneFrame.position[1] + player.y,
+                boneFrame.position[2],
+                boneFrame.quaternion[0],
+                boneFrame.quaternion[1],
+                boneFrame.quaternion[2],
+                boneFrame.quaternion[3],
+              );
+            }
+          } else if (!enemy.ready) {
+            enemy.position.addScaledVector(enemy.velocity, dt);
+            enemy.group.position.copy(enemy.position);
+            enemy.group.rotation.y = Math.atan2(enemy.velocity.x, enemy.velocity.z);
+          }
+
+          const flatDistance = Math.hypot(enemy.position.x - player.x, enemy.position.z - player.z);
+          if (flatDistance < enemy.radius + CHASE_PLAYER_RADIUS) {
+            chaseCaughtLocal = true;
+            setChaseCaught(true);
+            break;
+          }
+        }
+      };
+
       const onMouseDown = (e: MouseEvent) => {
         if (e.button !== 0) return;
         if (paintModeRef.current) {
@@ -1480,6 +1701,7 @@ export default function Walker({
         if (physics && !physicsMoved) physics.step();
         syncArtifacts(now, dt);
         syncRamp();
+        syncChase(now, dt);
 
         renderer.render(scene, camera);
       });
@@ -1499,6 +1721,10 @@ export default function Walker({
         if (deliveryRuntimeRef.current?.setEnabled === setDeliveryGameEnabled) {
           deliveryRuntimeRef.current = null;
         }
+        if (chaseRuntimeRef.current?.setEnabled === setChaseGameEnabled) {
+          chaseRuntimeRef.current = null;
+        }
+        clearChaseEnemies();
         for (const artifact of artifacts) artifact.body?.dispose();
         ramp.body?.dispose();
         physics?.dispose();
@@ -1525,7 +1751,7 @@ export default function Walker({
 
   // ── Edit intent submit ──
 
-  const onIntentSubmit = async (e: React.FormEvent) => {
+  const onIntentSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const text = intent.trim();
     const api = apiRef.current;
@@ -1599,408 +1825,70 @@ export default function Walker({
         />
       )}
 
-      {/* HUD — always visible when menu is closed */}
-      {!menuOpen && !splatLoading && (
-        <div style={HUD_FONT} className="pointer-events-none">
-          {/* top-left: back */}
-          <Link
-            href={backHref}
-            aria-label="back"
-            className={`pointer-events-auto absolute left-5 top-5 z-10 ${HUD_BOX_SQUARE}`}
-          >
-            <IconArrowLeft />
-          </Link>
+      <WalkerHud
+        backHref={backHref}
+        cameraFollowUI={cameraFollowUI}
+        chaseCaught={chaseCaught}
+        chaseCount={chaseCount}
+        chaseMode={chaseMode}
+        chaseSurvived={chaseSurvived}
+        deliveryDelivered={deliveryDelivered}
+        deliveryMode={deliveryMode}
+        menuOpen={menuOpen}
+        paintMode={paintMode}
+        rampSelectedUI={rampSelectedUI}
+        splatLoading={splatLoading}
+        viewMode={viewMode}
+        onClear={() => editActionsRef.current?.clear()}
+        onCycleViewMode={cycleViewMode}
+        onOpenControls={() => { setMenuTab("controls"); setMenuOpen(true); }}
+        onOpenEdit={() => { setMenuTab("edit"); setMenuOpen(true); }}
+        onToggleCameraFollow={() => {
+          const next = !cameraFollowRef.current;
+          cameraFollowRef.current = next;
+          setCameraFollowUI(next);
+        }}
+        onUndo={() => editActionsRef.current?.undo()}
+      />
 
-          {/* top-right: delivery objective */}
-          {deliveryMode && (
-            <div className="absolute right-5 top-5 z-10">
-              <div className="rounded-2xl border border-white/10 bg-black/55 px-4 py-3 text-right backdrop-blur-md">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-zinc-400">Delivered</div>
-                <div className="mt-1 text-[22px] leading-none text-white">
-                  {deliveryDelivered}/3
-                </div>
-                <div
-                  className={`mt-2 h-1.5 w-28 overflow-hidden rounded-full bg-white/10 ${
-                    deliveryDelivered === 3 ? "ring-1 ring-emerald-300/50" : ""
-                  }`}
-                >
-                  <div
-                    className="h-full rounded-full bg-emerald-300 transition-all duration-300"
-                    style={{ width: `${(deliveryDelivered / 3) * 100}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* left-center: ramp placement state */}
-          {deliveryMode && rampSelectedUI && (
-            <div className="absolute left-5 top-1/2 z-10 -translate-y-1/2">
-              <div className="rounded-2xl border border-cyan-200/20 bg-black/55 px-4 py-3 backdrop-blur-md">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-cyan-200">Ramp</div>
-                <div className="mt-1 text-[13px] text-white">Click floor to place</div>
-              </div>
-            </div>
-          )}
-
-          {deliveryMode && deliveryDelivered === 3 && (
-            <div className="absolute left-1/2 top-[88px] z-10 -translate-x-1/2">
-              <div className="rounded-2xl border border-emerald-200/25 bg-black/60 px-5 py-3 text-center backdrop-blur-md">
-                <div className="text-[10px] uppercase tracking-[0.18em] text-emerald-200">Complete</div>
-                <div className="mt-1 text-[14px] text-white">All artifacts delivered</div>
-              </div>
-            </div>
-          )}
-
-          {/* bottom-center: action tray */}
-          <div className="pointer-events-auto absolute bottom-6 left-1/2 z-10 -translate-x-1/2">
-            <div className="flex items-center gap-1 rounded-2xl border border-white/10 bg-black/55 p-1.5 backdrop-blur-md">
-              <button
-                onClick={() => editActionsRef.current?.undo()}
-                aria-label="undo"
-                title="undo (z)"
-                className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-300 hover:bg-white/10 hover:text-white"
-              >
-                <IconUndo />
-              </button>
-              <button
-                onClick={() => editActionsRef.current?.clear()}
-                aria-label="clear edits"
-                title="clear all (shift+z)"
-                className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-300 hover:bg-white/10 hover:text-white"
-              >
-                <IconTrash />
-              </button>
-              <div className="mx-1 h-5 w-px bg-white/10" />
-              <button
-                onClick={() => { setMenuTab("edit"); setMenuOpen(true); }}
-                aria-label="edit"
-                title="edit world"
-                className={`flex h-9 w-9 items-center justify-center rounded-lg ${
-                  paintMode
-                    ? "bg-white/15 text-white"
-                    : "text-zinc-300 hover:bg-white/10 hover:text-white"
-                }`}
-              >
-                <IconBrush />
-              </button>
-              <button
-                onClick={cycleViewMode}
-                aria-label="view mode"
-                title={
-                  viewMode === 0
-                    ? "view: mesh — press m for splat+mesh"
-                    : viewMode === 1
-                    ? "view: splat + mesh — press m for splat"
-                    : "view: splat — press m for mesh"
-                }
-                className={`flex h-9 w-9 items-center justify-center rounded-lg ${
-                  viewMode !== 0
-                    ? "bg-white/15 text-white"
-                    : "text-zinc-300 hover:bg-white/10 hover:text-white"
-                }`}
-              >
-                <IconGrid />
-              </button>
-              <button
-                onClick={() => {
-                  const next = !cameraFollowRef.current;
-                  cameraFollowRef.current = next;
-                  setCameraFollowUI(next);
-                }}
-                aria-label="camera follow"
-                title={cameraFollowUI ? "camera: locked" : "camera: free"}
-                className={`flex h-9 w-9 items-center justify-center rounded-lg ${
-                  cameraFollowUI
-                    ? "bg-white/15 text-white"
-                    : "text-zinc-300 hover:bg-white/10 hover:text-white"
-                }`}
-              >
-                <IconCamera />
-              </button>
-              <button
-                onClick={() => { setMenuTab("controls"); setMenuOpen(true); }}
-                aria-label="controls"
-                title="controls"
-                className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-300 hover:bg-white/10 hover:text-white"
-              >
-                <IconKeyboard />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-
-      {/* Menu */}
-      {menuOpen && (
-        <div
-          style={HUD_FONT}
-          className="absolute inset-0 z-20 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setMenuOpen(false);
-          }}
-        >
-          <div className="h-[560px] w-[500px] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl">
-            {/* tab bar */}
-            <div className="flex items-center justify-between border-b border-white/10 px-2 py-2">
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setMenuTab("edit")}
-                  className={`rounded-md px-3 py-1.5 text-[13px] ${
-                    menuTab === "edit"
-                      ? "bg-white/10 text-white"
-                      : "text-zinc-400 hover:text-white"
-                  }`}
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => setMenuTab("game")}
-                  className={`rounded-md px-3 py-1.5 text-[13px] ${
-                    menuTab === "game"
-                      ? "bg-white/10 text-white"
-                      : "text-zinc-400 hover:text-white"
-                  }`}
-                >
-                  Game
-                </button>
-                <button
-                  onClick={() => setMenuTab("controls")}
-                  className={`rounded-md px-3 py-1.5 text-[13px] ${
-                    menuTab === "controls"
-                      ? "bg-white/10 text-white"
-                      : "text-zinc-400 hover:text-white"
-                  }`}
-                >
-                  Controls
-                </button>
-              </div>
-              <button
-                onClick={toggleMenu}
-                aria-label="close"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:bg-white/10 hover:text-white"
-              >
-                <IconClose />
-              </button>
-            </div>
-
-            {/* content */}
-            <div className="h-[507px] p-5">
-              {menuTab === "edit" && (
-                <div className="space-y-5">
-                  {/* Paint mode toggle */}
-                  <button
-                    onClick={() => { setPaintMode((p) => !p); setMenuOpen(false); }}
-                    className={`w-full rounded-lg border px-4 py-2.5 text-[13px] transition ${
-                      paintMode
-                        ? "border-white/30 bg-white/15 text-white"
-                        : "border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:text-white"
-                    }`}
-                  >
-                    {paintMode ? "Painting — click & drag on world" : "Enable paintbrush"}
-                  </button>
-
-                  {/* Color */}
-                  <div>
-                    <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Color</div>
-                    <div className="flex flex-wrap gap-2">
-                      {Object.keys(COLOR_CSS).map((c) => (
-                        <button
-                          key={c}
-                          onClick={() => { setPaintColor(c); setPaintOp("recolor"); }}
-                          title={c}
-                          className={`h-7 w-7 rounded-full border-2 transition ${
-                            paintColor === c && paintOp === "recolor"
-                              ? "border-white scale-110"
-                              : "border-transparent hover:border-white/40"
-                          }`}
-                          style={{ backgroundColor: COLOR_CSS[c] }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Tool */}
-                  <div>
-                    <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Tool</div>
-                    <div className="flex gap-2">
-                      {(["recolor", "erase", "brighten", "darken"] as const).map((op) => (
-                        <button
-                          key={op}
-                          onClick={() => setPaintOp(op)}
-                          className={`${HUD_BOX_BASE} h-8 px-3 text-[12px] ${
-                            paintOp === op
-                              ? "border-white/30 bg-white/10 text-white"
-                              : ""
-                          }`}
-                        >
-                          {op}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Size */}
-                  <div>
-                    <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Size</div>
-                    <div className="flex gap-2">
-                      {Object.keys(SIZE_MAP).map((s) => (
-                        <button
-                          key={s}
-                          onClick={() => setPaintSize(s)}
-                          className={`${HUD_BOX_BASE} h-8 px-3 text-[12px] ${
-                            paintSize === s
-                              ? "border-white/30 bg-white/10 text-white"
-                              : ""
-                          }`}
-                        >
-                          {s}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* AI edit */}
-                  <div>
-                    <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">AI Edit</div>
-                    <form onSubmit={onIntentSubmit}>
-                      <input
-                        type="text"
-                        value={intent}
-                        onChange={(e) => setIntent(e.target.value)}
-                        placeholder={submitting ? "thinking…" : "make the table blue"}
-                        disabled={submitting}
-                        className="w-full rounded-lg border border-white/10 bg-white/5 px-3.5 py-2.5 text-[13px] text-white placeholder:text-zinc-500 focus:border-white/30 focus:outline-none disabled:opacity-50"
-                      />
-                      {error && menuTab === "edit" && (
-                        <div className="mt-3 text-[12px] text-red-400">{error}</div>
-                      )}
-                      {lastEdit?.reason && !submitting && !error && (
-                        <div className="mt-3 text-[12px] leading-relaxed text-zinc-400">
-                          {lastEdit.reason}
-                        </div>
-                      )}
-                    </form>
-                  </div>
-                </div>
-              )}
-
-              {menuTab === "game" && (
-                <div>
-                  <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Games</div>
-                  <button
-                    onClick={() => setDeliveryMode((enabled) => !enabled)}
-                    className={`flex w-full items-center justify-between rounded-lg border px-4 py-3 text-left transition ${
-                      deliveryMode
-                        ? "border-emerald-200/30 bg-emerald-300/15 text-emerald-100"
-                        : "border-white/10 bg-white/5 text-zinc-300 hover:border-white/20 hover:text-white"
-                    }`}
-                  >
-                    <span className="text-[14px] text-white">Artifact Delivery</span>
-                    <span className="text-[12px]">{deliveryMode ? "On" : "Off"}</span>
-                  </button>
-                </div>
-              )}
-
-              {menuTab === "controls" && (
-                <div className="space-y-4">
-                  {/* Keys */}
-                  <div className="space-y-2 text-[13px]">
-                    <div className="flex justify-between">
-                      <span className="text-white">Walk</span>
-                      <span className="text-zinc-400">wasd</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-white">Orbit camera</span>
-                      <span className="text-zinc-400">click + drag</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-white">Zoom</span>
-                      <span className="text-zinc-400">scroll</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-white">Undo / clear</span>
-                      <span className="text-zinc-400">z / shift+z</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-white">Mesh overlay</span>
-                      <span className="text-zinc-400">m</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-white">Game options</span>
-                      <span className="text-zinc-400">Game tab</span>
-                    </div>
-                  </div>
-
-                  {/* Character */}
-                  <div>
-                    <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Character</div>
-                    <div className="flex gap-2">
-                      {CHARACTERS.map((c) => (
-                        <button
-                          key={c.label}
-                          onClick={() => loadCharacter(c)}
-                          disabled={charLoading}
-                          className={`${HUD_BOX_BASE} h-8 px-3 text-[12px] ${
-                            activeChar === c.label
-                              ? "border-white/30 bg-white/10 text-white"
-                              : ""
-                          }`}
-                        >
-                          {c.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Speed */}
-                  <div>
-                    <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Speed</div>
-                    <div className="flex gap-2">
-                      {SPEED_TIERS.map((t) => (
-                        <button
-                          key={t.label}
-                          onClick={() => pickSpeed(t.label, t.value)}
-                          className={`${HUD_BOX_BASE} h-8 px-3 text-[12px] ${
-                            activeSpeed === t.label
-                              ? "border-white/30 bg-white/10 text-white"
-                              : ""
-                          }`}
-                        >
-                          {t.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Style */}
-                  {styles.length > 0 && (
-                    <div>
-                      <div className="mb-2 text-[11px] uppercase tracking-wider text-zinc-500">Style</div>
-                      <div className="flex flex-wrap gap-2">
-                        {styles.map((s) => (
-                          <button
-                            key={s}
-                            onClick={() => pickStyle(s)}
-                            className={`${HUD_BOX_BASE} h-8 px-3 text-[12px] ${
-                              activeStyle === s
-                                ? "border-white/30 bg-white/10 text-white"
-                                : ""
-                            }`}
-                          >
-                            {s}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <WalkerMenu
+        activeChar={activeChar}
+        activeSpeed={activeSpeed}
+        activeStyle={activeStyle}
+        characters={CHARACTERS}
+        charLoading={charLoading}
+        chaseMode={chaseMode}
+        colorCss={COLOR_CSS}
+        deliveryMode={deliveryMode}
+        error={error}
+        intent={intent}
+        lastEdit={lastEdit}
+        menuOpen={menuOpen}
+        menuTab={menuTab}
+        paintColor={paintColor}
+        paintMode={paintMode}
+        paintOp={paintOp}
+        paintSize={paintSize}
+        sizeMap={SIZE_MAP}
+        speedTiers={SPEED_TIERS}
+        styles={styles}
+        submitting={submitting}
+        onBackdropClose={() => setMenuOpen(false)}
+        onClose={toggleMenu}
+        onIntentChange={setIntent}
+        onIntentSubmit={onIntentSubmit}
+        onLoadCharacter={loadCharacter}
+        onPickSpeed={pickSpeed}
+        onPickStyle={pickStyle}
+        onSetChaseMode={setChaseMode}
+        onSetDeliveryMode={setDeliveryMode}
+        onSetMenuOpen={setMenuOpen}
+        onSetMenuTab={setMenuTab}
+        onSetPaintColor={setPaintColor}
+        onSetPaintMode={setPaintMode}
+        onSetPaintOp={setPaintOp}
+        onSetPaintSize={setPaintSize}
+      />
 
     </>
   );
