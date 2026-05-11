@@ -9,6 +9,10 @@
 // Load onnxruntime-web from CDN — avoids Turbopack bundling issues
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _ort: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const sessionCache = new Map<string, Promise<any>>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const sessionRunQueue = new WeakMap<any, Promise<unknown>>();
 const getOrt = async () => {
   if (_ort) return _ort;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -27,6 +31,19 @@ const getOrt = async () => {
     script.onerror = () => reject(new Error("Failed to load onnxruntime-web from CDN"));
     document.head.appendChild(script);
   });
+};
+
+const runSessionQueued = async (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  session: any,
+  feeds: Record<string, unknown>,
+) => {
+  const previous = sessionRunQueue.get(session) ?? Promise.resolve();
+  const run = previous
+    .catch(() => undefined)
+    .then(() => session.run(feeds));
+  sessionRunQueue.set(session, run.catch(() => undefined));
+  return run;
 };
 
 // ─── Constants ───
@@ -621,9 +638,16 @@ export class LocomotionEngine {
 
   async loadModel(onnxUrl: string) {
     const ORT = await getOrt();
-    this.session = await ORT.InferenceSession.create(onnxUrl, {
-      executionProviders: ["wasm"],
-    });
+    const cachedSession = sessionCache.get(onnxUrl);
+    if (cachedSession) {
+      this.session = await cachedSession;
+    } else {
+      const sessionPromise = ORT.InferenceSession.create(onnxUrl, {
+        executionProviders: ["wasm"],
+      });
+      sessionCache.set(onnxUrl, sessionPromise);
+      this.session = await sessionPromise;
+    }
     this.ready = true;
     console.log("[loco] ONNX model loaded");
   }
@@ -666,7 +690,7 @@ export class LocomotionEngine {
 
   private control(dt: number) {
     const rootPos = mat4GetPos(this.root);
-    let velocity = this.inputVelocity;
+    const velocity = this.inputVelocity;
     let direction = v3Copy(this.inputDirection);
     if (v3Len(direction) < 0.01) direction = mat4GetAxisZ(this.root);
 
@@ -777,7 +801,7 @@ export class LocomotionEngine {
     const ORT = await getOrt();
     const inputTensor = new ORT.Tensor("float32", input, [1, this.data.inputDim]);
     try {
-      const results = await this.session.run({ input: inputTensor });
+      const results = await runSessionQueued(this.session, { input: inputTensor });
       const outputData = results.output.data as Float32Array;
       this.unpackPrediction(outputData, root);
     } catch (e) {
